@@ -1,0 +1,15 @@
+{
+  extends: [
+    "github>nwarila-platform/pdq-deploy-inventory//.github/renovate.json5",
+  ],
+  packageRules: [
+    {
+      matchPackageNames: [
+        "nwarila-platform/**",
+        "NWarila/**",
+        "ghcr.io/nwarila-platform/**",
+      ],
+      minimumReleaseAge: null,
+    },
+  ],
+}

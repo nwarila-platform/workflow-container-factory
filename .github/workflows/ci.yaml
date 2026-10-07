@@ -1,0 +1,171 @@
+# Purpose: test every factory container from source and as an image on both release architectures.
+# Role: pull request and main-push gate with one stable aggregate result.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  list:
+    name: list containers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      containers: ${{ steps.list.outputs.containers }}
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: List containers
+        id: list
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          names = sorted(path.parent.name for path in Path("containers").glob("*/Containerfile"))
+          if not names:
+              raise SystemExit("no containers found")
+          for name in names:
+              if len(name) > 91 or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name) is None:
+                  raise SystemExit(f"invalid container name: {name!r}")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"containers={json.dumps(names, separators=(',', ':'))}\n")
+          print(f"containers: {', '.join(names)}")
+          PY
+
+  host:
+    name: host harness (${{ matrix.name }})
+    needs: list
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.list.outputs.containers) }}
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Validate VERSION
+        env:
+          NAME: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          python3.12 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          name = os.environ["NAME"]
+          raw = Path("containers", name, "VERSION").read_bytes()
+          if not raw.endswith(b"\n") or raw.count(b"\n") != 1:
+              raise SystemExit(f"containers/{name}/VERSION must be one LF-terminated line")
+          try:
+              version = raw[:-1].decode("ascii")
+          except UnicodeDecodeError as error:
+              raise SystemExit(f"containers/{name}/VERSION must be ASCII") from error
+          if re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version) is None:
+              raise SystemExit(f"containers/{name}/VERSION is not strict X.Y.Z: {version!r}")
+          print(f"{name} version: {version}")
+          PY
+      - name: Host tests
+        env:
+          NAME: ${{ matrix.name }}
+        run: bash "containers/${NAME}/tests/host.sh"
+
+  image:
+    name: image parity (${{ matrix.name }}, ${{ matrix.arch }})
+    needs: list
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.list.outputs.containers) }}
+        arch: [amd64, arm64]
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          platforms: amd64,arm64
+          image: docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          cache-image: false
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        id: buildx
+        with:
+          version: v0.35.0
+          driver: docker-container
+          driver-opts: image=docker.io/moby/buildkit:v0.31.2@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
+          cache-binary: false
+      - name: Build image
+        env:
+          ARCH: ${{ matrix.arch }}
+          BUILDER: ${{ steps.buildx.outputs.name }}
+          NAME: ${{ matrix.name }}
+        run: docker buildx build --builder "$BUILDER" -f "containers/$NAME/Containerfile" --platform "linux/$ARCH" --tag "workflow-container:ci-$NAME-$ARCH" --load "containers/$NAME"
+      - name: Image tests
+        env:
+          ARCH: ${{ matrix.arch }}
+          NAME: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          image="workflow-container:ci-${NAME}-${ARCH}"
+          test "$(docker image inspect "$image" --format '{{.Config.User}}')" = 65532:65532
+          bash "containers/${NAME}/tests/image.sh" "$image" "linux/$ARCH"
+
+  result:
+    name: CI result
+    if: always()
+    needs: [list, host, image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - name: Require every CI job
+        env:
+          LIST_RESULT: ${{ needs.list.result }}
+          HOST_RESULT: ${{ needs.host.result }}
+          IMAGE_RESULT: ${{ needs.image.result }}
+        run: |
+          set -euo pipefail
+          test "$LIST_RESULT" = success
+          test "$HOST_RESULT" = success
+          test "$IMAGE_RESULT" = success
