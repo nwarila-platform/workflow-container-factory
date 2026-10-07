@@ -1,0 +1,57 @@
+# Deny by default: nothing is tracked unless it is allowed below, by name (org ADR-0003).
+# Adding a file to the repository therefore means adding it here first, which makes publishing a
+# file a deliberate, reviewable act instead of an accident.
+
+# Ignore everything ...
+**
+
+# ... then allow each directory that holds a tracked file. Git does not look inside an ignored
+# directory, so every directory on the way to an allowed file is listed. This allows no file.
+!/.github/
+!/.github/workflows/
+!/containers/
+!/containers/template-drift/
+!/containers/template-drift/example/
+!/containers/template-drift/example/repository/
+!/containers/template-drift/example/template/
+!/containers/template-drift/tests/
+!/containers/template-drift/workflow_template_drift/
+!/tools/
+
+# The template-drift checker, image, tests, and example.
+!/containers/template-drift/Containerfile
+!/containers/template-drift/.dockerignore
+!/containers/template-drift/VERSION
+!/containers/template-drift/README.md
+!/containers/template-drift/example/expected-report.txt
+!/containers/template-drift/example/repository/CHANGELOG.md
+!/containers/template-drift/example/repository/legacy.cfg
+!/containers/template-drift/example/repository/lint.toml
+!/containers/template-drift/example/repository/pipeline.yaml
+!/containers/template-drift/example/template/lint.toml
+!/containers/template-drift/example/template/pipeline.yaml
+!/containers/template-drift/example/template/template-drift.json
+!/containers/template-drift/tests/host.sh
+!/containers/template-drift/tests/image.sh
+!/containers/template-drift/tests/test_checker.py
+!/containers/template-drift/workflow_template_drift/__init__.py
+!/containers/template-drift/workflow_template_drift/__main__.py
+!/containers/template-drift/workflow_template_drift/checker.py
+
+# Continuous integration, release workflows, ownership, and dependency updates.
+!/.github/workflows/ci.yaml
+!/.github/workflows/release.yaml
+!/.github/workflows/build.yaml
+!/.github/renovate.json5
+!/.github/CODEOWNERS
+
+# Shared release tooling.
+!/tools/install-crane.sh
+
+# Documents and repository settings.
+!/README.md
+!/LICENSE
+!/SECURITY.md
+!/.editorconfig
+!/.gitattributes
+!/.gitignore

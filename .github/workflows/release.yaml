@@ -1,0 +1,97 @@
+# Purpose: accept one signed container release tag and call the isolated reusable builder.
+
+name: Release
+
+on:
+  push:
+    tags: ['*/v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: release tag integrity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      name: ${{ steps.release.outputs.name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - name: Require a signed annotated release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag_name="${GITHUB_REF#refs/tags/}"
+          test "${GITHUB_REF}" = "refs/tags/${tag_name}"
+          test "${GITHUB_REF_NAME}" = "${tag_name}"
+          ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag_name}")"
+          test "$(jq -r '.ref' <<<"${ref_json}")" = "${GITHUB_REF}"
+          test "$(jq -r '.object.type' <<<"${ref_json}")" = tag
+          tag_object_sha="$(jq -r '.object.sha' <<<"${ref_json}")"
+          [[ "${tag_object_sha}" =~ ^[0-9a-f]{40}$ ]]
+          tag_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object_sha}")"
+          test "$(jq -r '.sha' <<<"${tag_json}")" = "${tag_object_sha}"
+          test "$(jq -r '.tag' <<<"${tag_json}")" = "${tag_name}"
+          test "$(jq -r '.object.type' <<<"${tag_json}")" = commit
+          test "$(jq -r '.object.sha' <<<"${tag_json}")" = "${GITHUB_SHA}"
+          test "$(jq -r '.verification.verified' <<<"${tag_json}")" = true
+          printf 'signed annotated release tag verified: refs/tags/%s -> %s\n' "${tag_name}" "${GITHUB_SHA}"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Validate container and version
+        id: release
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          tag = os.environ["GITHUB_REF"].removeprefix("refs/tags/")
+          match = re.fullmatch(
+              r"([a-z0-9]+(?:-[a-z0-9]+)*)/v((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))",
+              tag,
+          )
+          if match is None:
+              raise SystemExit(f"invalid release tag: {tag!r}")
+          name, version = match.groups()
+          if len(name) > 91:
+              raise SystemExit(f"invalid container name: {name!r}")
+          root = Path("containers", name)
+          if not (root / "Containerfile").is_file():
+              raise SystemExit(f"container has no Containerfile: {name!r}")
+          raw = (root / "VERSION").read_bytes()
+          if raw != f"{version}\n".encode("ascii"):
+              raise SystemExit(f"containers/{name}/VERSION must be exactly {version!r} and one LF")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"name={name}\nversion={version}\n")
+          print(f"release selected: {name} {version}")
+          PY
+          test "$(git cat-file -t "${GITHUB_SHA}")" = commit
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+
+  build:
+    needs: tag
+    uses: ./.github/workflows/build.yaml
+    with:
+      name: ${{ needs.tag.outputs.name }}
+      version: ${{ needs.tag.outputs.version }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
