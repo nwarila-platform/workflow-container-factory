@@ -1,3 +1,12 @@
+# Purpose: prove the organization runner's contract 2 against real factory images.
+# Role: one passing run of runner-selftest, then four refusals in the runner's expect: refuse mode,
+# which never runs a container. The copy job deliberately copies template-drift 3.0.2 and its
+# signature into the runner-selftest package, so the runner can show that it finds that signature
+# and refuses it. Digests:
+# runner-selftest 1.0.0 sha256:dd291fb72ee121979ef4f25c45ef663ff2ea544b45bb6438d2c11fb0ca30c079,
+# template-drift 3.0.2 sha256:5bb864992d263749a8c648f01518b1bf64482746d0a7d0f1c8c398ce588cc159,
+# template-drift 3.0.1 sha256:cfa642722759575d51d59d6508e6bfd50844b03e0793226e9a7b2d947bea60ff
+# (no requirement labels).
 name: Runner acceptance
 on:
   workflow_dispatch:
@@ -13,7 +22,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: nwarila-platform/.github/.github/workflows/run-container.yaml@85e5d3b4402175d778b28489d2ec43cf0e7336bf
+    uses: nwarila-platform/.github/.github/workflows/run-container.yaml@95ca3c2332c8037f1ede76d1c2bd1a6b6ee43d4f
     with:
       name: runner-selftest
       version: 1.0.0
@@ -24,6 +33,7 @@ jobs:
   copy:
     name: copy
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
       packages: write
@@ -64,7 +74,7 @@ jobs:
             >verification.json
           verified=$(jq -er '.[0].critical.image["docker-manifest-digest"] | select(test("^sha256:[0-9a-f]{64}$"))' verification.json)
           [[ "$verified" == sha256:5bb864992d263749a8c648f01518b1bf64482746d0a7d0f1c8c398ce588cc159 ]]
-          echo 'copied signature found: template-drift identity at runner-selftest@sha256:5bb864992d263749a8c648f01518b1bf64482746d0a7d0f1c8c398ce588cc159'
+          printf 'copied signature found: template-drift identity at runner-selftest@%s\n' "$verified"
 
   copied-image-refused:
     name: copied image refused
@@ -72,7 +82,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: nwarila-platform/.github/.github/workflows/run-container.yaml@85e5d3b4402175d778b28489d2ec43cf0e7336bf
+    uses: nwarila-platform/.github/.github/workflows/run-container.yaml@95ca3c2332c8037f1ede76d1c2bd1a6b6ee43d4f
     with:
       name: runner-selftest
       version: 1.0.0
@@ -85,7 +95,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: nwarila-platform/.github/.github/workflows/run-container.yaml@85e5d3b4402175d778b28489d2ec43cf0e7336bf
+    uses: nwarila-platform/.github/.github/workflows/run-container.yaml@95ca3c2332c8037f1ede76d1c2bd1a6b6ee43d4f
     with:
       name: runner-selftest
       version: 9.9.9
@@ -98,7 +108,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: nwarila-platform/.github/.github/workflows/run-container.yaml@85e5d3b4402175d778b28489d2ec43cf0e7336bf
+    uses: nwarila-platform/.github/.github/workflows/run-container.yaml@95ca3c2332c8037f1ede76d1c2bd1a6b6ee43d4f
     with:
       name: template-drift
       version: 3.0.1
@@ -111,7 +121,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: nwarila-platform/.github/.github/workflows/run-container.yaml@85e5d3b4402175d778b28489d2ec43cf0e7336bf
+    uses: nwarila-platform/.github/.github/workflows/run-container.yaml@95ca3c2332c8037f1ede76d1c2bd1a6b6ee43d4f
     with:
       name: runner-selftest
       version: 1.0.0
