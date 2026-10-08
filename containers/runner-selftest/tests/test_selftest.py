@@ -28,10 +28,14 @@ class SelftestTest(unittest.TestCase):
         self.assertEqual(checks.user(lambda: 1, lambda: 2).detail, "expected uid/gid 65532/65532, got 1/2")
 
     def test_capabilities_require_a_zero_effective_set(self):
-        status = self.write("status", "CapEff:\t0000000000000000\nNoNewPrivs:\t1\n")
+        status = self.write("status", "CapEff:\t0000000000000000\nCapBnd:\t0000000000000000\nNoNewPrivs:\t1\n")
         self.assertTrue(checks.capabilities(status).passed)
-        status.write_text("CapEff:\t0000000000000001\n")
+        status.write_text("CapEff:\t0000000000000001\nCapBnd:\t0000000000000000\n")
         self.assertEqual(checks.capabilities(status).detail, "CapEff is 0000000000000001")
+
+    def test_capabilities_require_a_zero_bounding_set(self):
+        status = self.write("status", "CapEff:\t0000000000000000\nCapBnd:\t00000000a80425fb\n")
+        self.assertEqual(checks.capabilities(status).detail, "CapBnd is 00000000a80425fb")
 
     def test_no_new_privileges_requires_one(self):
         status = self.write("status", "NoNewPrivs:\t1\n")
@@ -63,10 +67,17 @@ class SelftestTest(unittest.TestCase):
         self.assertTrue(checks.readable("template readable: acme/template", self.root).passed)
 
     def test_scratch_writes_reads_removes_and_checks_mount_options(self):
-        mounts = self.write("mounts", f"tmpfs {self.root} tmpfs rw,nosuid,nodev,noexec 0 0\n")
+        mounts = self.write(
+            "mounts",
+            f"tmpfs {self.root} tmpfs rw,nosuid,nodev 0 0\n"
+            f"tmpfs {self.root} tmpfs rw,nosuid,nodev,noexec 0 0\n",
+        )
         self.assertTrue(checks.scratch(self.root, mounts).passed)
         self.assertFalse((self.root / ".runner-selftest-probe").exists())
-        mounts.write_text(f"tmpfs {self.root} tmpfs rw,nosuid,nodev 0 0\n")
+        mounts.write_text(
+            f"tmpfs {self.root} tmpfs rw,nosuid,nodev,noexec 0 0\n"
+            f"tmpfs {self.root} tmpfs rw,nosuid,nodev 0 0\n"
+        )
         self.assertEqual(checks.scratch(self.root, mounts).detail, "missing mount options: noexec")
 
     def test_wrong_arguments_are_usage_errors_without_a_report(self):

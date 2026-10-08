@@ -1,13 +1,48 @@
 # runner-selftest
 
-`runner-selftest` reports whether the workflow container runner grants exactly the isolation its
-containers expect: the fixed unprivileged user, no capabilities, no new privileges, no network,
-read-only image and input mounts, and a restricted writable scratch mount.
+`runner-selftest` checks, from inside a container, the isolation that the organization's runner applies.
+It prints one line per check, in this order:
+
+- `user`: the process runs as user and group 65532.
+- `capabilities`: the effective and bounding capability sets are empty.
+- `no-new-privileges`: the process cannot gain privileges.
+- `network`: the only network interface is loopback.
+- `root read-only`: the image's root file system cannot be written.
+- `workspace readable` and `workspace read-only`: the workspace has an entry and cannot be written.
+- `template readable` and `template read-only`: the same, once for each template.
+- `scratch`: a file can be written in `/tmp`, which is mounted `nosuid`, `nodev` and `noexec`.
+
+It does not look for other writable mounts, such as `/home/nonroot` or `/dev/shm`.
+
+Example output with one template:
+
+```text
+ok: user
+ok: capabilities
+ok: no-new-privileges
+ok: network
+ok: root read-only
+ok: workspace readable
+ok: workspace read-only
+ok: template readable: example/template
+ok: template read-only: example/template
+ok: scratch
+runner-selftest: PASS (10 checks)
+```
 
 ## Run the image
 
 Mount a nonempty workspace and at least one nonempty template. The image runs as user `65532`, so
 that user must be able to read every mounted file and directory. From this directory:
+
+After 1.0.0 is published, set `digest` and verify the image:
+
+```sh
+digest=$(crane digest ghcr.io/nwarila-platform/workflow-runner-selftest:1.0.0)
+cosign verify "ghcr.io/nwarila-platform/workflow-runner-selftest@${digest}" \
+  --certificate-identity "https://github.com/nwarila-platform/workflow-container-factory/.github/workflows/build.yaml@refs/tags/runner-selftest/v1.0.0" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
 
 ```sh
 docker run --rm --platform linux/amd64 --network=none --read-only --cap-drop=ALL \
@@ -23,5 +58,6 @@ docker run --rm --platform linux/amd64 --network=none --read-only --cap-drop=ALL
 ```
 
 Exit status `0` means every check passed. Exit status `1` means at least one isolation check failed.
-Exit status `2` means the selftest could not run or its arguments were invalid. The F-D6 write flag
-does not apply: this container checks runner isolation and has nothing to correct.
+Exit status `2` means the selftest could not run or its arguments were invalid. Other workflow
+containers take a flag that writes corrected files locally. This one has none, because it checks the
+runner's isolation and has nothing to correct.

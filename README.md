@@ -55,9 +55,11 @@ gh attestation verify "oci://ghcr.io/nwarila-platform/workflow-template-drift@${
 | runner-selftest | 1.0.0 | `ghcr.io/nwarila-platform/workflow-runner-selftest` |
 | template-drift | 3.0.2 | `ghcr.io/nwarila-platform/workflow-template-drift` |
 
+A version here is published when its release tag's run succeeds.
+
 ## Status
 
 Consumers must keep using the standalone `workflow-template-drift` release for now. They switch
 after the organization's shared workflow that runs these containers accepts the factory's signing
-identity, this container gains its local write mode, and its GitHub Release is published with its
-digest, provenance and SBOM.
+identity, template-drift gains its local write mode, and its GitHub Release is published with its digest,
+provenance and SBOM.

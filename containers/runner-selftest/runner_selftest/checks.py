@@ -32,9 +32,9 @@ def _status_value(status: Path, key: str) -> str:
 
 
 def capabilities(status: Path = Path("/proc/self/status")) -> Result:
-    value = _status_value(status, "CapEff")
-    detail = None if value == "0000000000000000" else f"CapEff is {value}"
-    return Result("capabilities", detail)
+    values = {key: _status_value(status, key) for key in ("CapEff", "CapBnd")}
+    nonzero = [f"{key} is {value}" for key, value in values.items() if value != "0000000000000000"]
+    return Result("capabilities", "; ".join(nonzero) or None)
 
 
 def no_new_privileges(status: Path = Path("/proc/self/status")) -> Result:
@@ -100,7 +100,6 @@ def scratch(tmp: Path = Path("/tmp"), mounts: Path = Path("/proc/self/mounts")) 
         fields = line.split()
         if len(fields) >= 4 and fields[1] == str(tmp):
             options = set(fields[3].split(","))
-            break
     if options is None:
         return Result("scratch", f"{tmp} has no mount entry")
     missing = sorted({"nosuid", "nodev", "noexec"} - options)
