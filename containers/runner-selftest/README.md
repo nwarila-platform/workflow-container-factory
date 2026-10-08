@@ -37,12 +37,15 @@ runner-selftest: PASS (11 checks)
 Mount a nonempty workspace and at least one nonempty template. The image runs as user `65532`, so
 that user must be able to read every mounted file and directory. From this directory:
 
-After 1.0.0 is published, set `digest` and verify the image:
+Set `version` to the release you want from the factory's
+[Releases page](https://github.com/nwarila-platform/workflow-container-factory/releases), then verify
+the image:
 
 ```sh
-digest=$(crane digest ghcr.io/nwarila-platform/workflow-runner-selftest:1.0.0)
+version='<release version>'
+digest=$(crane digest "ghcr.io/nwarila-platform/workflow-runner-selftest:${version}")
 cosign verify "ghcr.io/nwarila-platform/workflow-runner-selftest@${digest}" \
-  --certificate-identity "https://github.com/nwarila-platform/workflow-container-factory/.github/workflows/build.yaml@refs/tags/runner-selftest/v1.0.0" \
+  --certificate-identity "https://github.com/nwarila-platform/workflow-container-factory/.github/workflows/build.yaml@refs/tags/runner-selftest/v${version}" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
@@ -60,6 +63,5 @@ docker run --rm --platform linux/amd64 --network=none --read-only --cap-drop=ALL
 ```
 
 Exit status `0` means every check passed. Exit status `1` means at least one isolation check failed.
-Exit status `2` means the selftest could not run or its arguments were invalid. Other workflow
-containers take a flag that writes corrected files locally. This one has none, because it checks the
-runner's isolation and has nothing to correct.
+Exit status `2` means the selftest could not run or its arguments were invalid. This container has no
+write mode because it checks the runner's isolation and has nothing to correct.

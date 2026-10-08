@@ -15,7 +15,8 @@ be able to read every mounted file and directory. The image test copies the exam
 `chmod -R a+rX` on the copy for this reason. Do the same if your checkout is not world-readable.
 This example uses the same arguments and runtime restrictions as the image test:
 
-Verify the image first with the commands in the factory's README. They set `digest`.
+Verify the image first with the factory's [release verification steps](../../README.md#verify-a-release-yourself).
+They set `digest`.
 
 ```sh
 docker run --rm --platform linux/amd64 --network=none --read-only --cap-drop=ALL \
