@@ -67,6 +67,7 @@
 !/.github/workflows/ci.yaml
 !/.github/workflows/release.yaml
 !/.github/workflows/build.yaml
+!/.github/workflows/runner-acceptance.yaml
 !/.github/renovate.json5
 !/.github/CODEOWNERS
 

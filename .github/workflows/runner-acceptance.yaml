@@ -1,0 +1,120 @@
+name: Runner acceptance
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    paths: ['.github/workflows/runner-acceptance.yaml']
+permissions:
+  contents: read
+jobs:
+  selftest:
+    name: selftest passes
+    permissions:
+      contents: read
+      security-events: write
+    uses: nwarila-platform/.github/.github/workflows/run-container.yaml@85e5d3b4402175d778b28489d2ec43cf0e7336bf
+    with:
+      name: runner-selftest
+      version: 1.0.0
+      contract: 2
+      digest: sha256:dd291fb72ee121979ef4f25c45ef663ff2ea544b45bb6438d2c11fb0ca30c079
+      expect: pass
+
+  copy:
+    name: copy
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            ghcr.io:443
+            github.com:443
+            pkg-containers.githubusercontent.com:443
+            prod.app-api.stepsecurity.io:443
+            productionresultssa*.blob.core.windows.net:443
+            raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            rekor.sigstore.dev:443
+            results-receiver.actions.githubusercontent.com:443
+            tuf-repo-cdn.sigstore.dev:443
+            *.githubapp.com:443
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with: {cosign-release: v2.5.2}
+      - name: Copy image and verify travelled signature
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | cosign login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          cosign copy --force \
+            "ghcr.io/nwarila-platform/workflow-template-drift@sha256:5bb864992d263749a8c648f01518b1bf64482746d0a7d0f1c8c398ce588cc159" \
+            "ghcr.io/nwarila-platform/workflow-runner-selftest:acceptance-copied-template-drift-3.0.2"
+          cosign verify -o json \
+            "ghcr.io/nwarila-platform/workflow-runner-selftest@sha256:5bb864992d263749a8c648f01518b1bf64482746d0a7d0f1c8c398ce588cc159" \
+            --certificate-identity https://github.com/nwarila-platform/workflow-container-factory/.github/workflows/build.yaml@refs/tags/template-drift/v3.0.2 \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-repository nwarila-platform/workflow-container-factory \
+            --certificate-github-workflow-ref refs/tags/template-drift/v3.0.2 \
+            >verification.json
+          verified=$(jq -er '.[0].critical.image["docker-manifest-digest"] | select(test("^sha256:[0-9a-f]{64}$"))' verification.json)
+          [[ "$verified" == sha256:5bb864992d263749a8c648f01518b1bf64482746d0a7d0f1c8c398ce588cc159 ]]
+          echo 'copied signature found: template-drift identity at runner-selftest@sha256:5bb864992d263749a8c648f01518b1bf64482746d0a7d0f1c8c398ce588cc159'
+
+  copied-image-refused:
+    name: copied image refused
+    needs: copy
+    permissions:
+      contents: read
+      security-events: write
+    uses: nwarila-platform/.github/.github/workflows/run-container.yaml@85e5d3b4402175d778b28489d2ec43cf0e7336bf
+    with:
+      name: runner-selftest
+      version: 1.0.0
+      contract: 2
+      digest: sha256:5bb864992d263749a8c648f01518b1bf64482746d0a7d0f1c8c398ce588cc159
+      expect: refuse
+
+  wrong-version-refused:
+    name: wrong version refused
+    permissions:
+      contents: read
+      security-events: write
+    uses: nwarila-platform/.github/.github/workflows/run-container.yaml@85e5d3b4402175d778b28489d2ec43cf0e7336bf
+    with:
+      name: runner-selftest
+      version: 9.9.9
+      contract: 2
+      digest: sha256:dd291fb72ee121979ef4f25c45ef663ff2ea544b45bb6438d2c11fb0ca30c079
+      expect: refuse
+
+  missing-labels-refused:
+    name: missing labels refused
+    permissions:
+      contents: read
+      security-events: write
+    uses: nwarila-platform/.github/.github/workflows/run-container.yaml@85e5d3b4402175d778b28489d2ec43cf0e7336bf
+    with:
+      name: template-drift
+      version: 3.0.1
+      contract: 2
+      digest: sha256:cfa642722759575d51d59d6508e6bfd50844b03e0793226e9a7b2d947bea60ff
+      expect: refuse
+
+  wrong-contract-refused:
+    name: wrong contract refused
+    permissions:
+      contents: read
+      security-events: write
+    uses: nwarila-platform/.github/.github/workflows/run-container.yaml@85e5d3b4402175d778b28489d2ec43cf0e7336bf
+    with:
+      name: runner-selftest
+      version: 1.0.0
+      contract: 1
+      digest: sha256:dd291fb72ee121979ef4f25c45ef663ff2ea544b45bb6438d2c11fb0ca30c079
+      expect: refuse
