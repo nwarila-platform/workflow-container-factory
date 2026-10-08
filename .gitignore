@@ -8,8 +8,15 @@
 # ... then allow each directory that holds a tracked file. Git does not look inside an ignored
 # directory, so every directory on the way to an allowed file is listed. This allows no file.
 !/.github/
+!/.github/.config/
 !/.github/workflows/
 !/containers/
+!/containers/runner-selftest/
+!/containers/runner-selftest/example/
+!/containers/runner-selftest/example/template/
+!/containers/runner-selftest/example/workspace/
+!/containers/runner-selftest/runner_selftest/
+!/containers/runner-selftest/tests/
 !/containers/template-drift/
 !/containers/template-drift/example/
 !/containers/template-drift/example/repository/
@@ -17,6 +24,24 @@
 !/containers/template-drift/tests/
 !/containers/template-drift/workflow_template_drift/
 !/tools/
+
+# The runner-selftest image, tests, and example mounts.
+!/containers/runner-selftest/Containerfile
+!/containers/runner-selftest/.dockerignore
+!/containers/runner-selftest/VERSION
+!/containers/runner-selftest/README.md
+!/containers/runner-selftest/example/template/README.txt
+!/containers/runner-selftest/example/workspace/README.txt
+!/containers/runner-selftest/runner_selftest/__init__.py
+!/containers/runner-selftest/runner_selftest/__main__.py
+!/containers/runner-selftest/runner_selftest/checks.py
+!/containers/runner-selftest/tests/host.sh
+!/containers/runner-selftest/tests/image.sh
+!/containers/runner-selftest/tests/test_selftest.py
+
+# Pinned inputs for the runner-selftest acceptance call.
+!/.github/.config/runner-selftest.yaml
+!/.github/.config/runner-selftest.lock
 
 # The template-drift checker, image, tests, and example.
 !/containers/template-drift/Containerfile
@@ -47,6 +72,7 @@
 
 # Shared release tooling.
 !/tools/install-crane.sh
+!/tools/check-labels.sh
 
 # Documents and repository settings.
 !/README.md
