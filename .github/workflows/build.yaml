@@ -348,6 +348,7 @@ jobs:
             "ghcr.io/nwarila-platform/workflow-${NAME}" \
             "$INDEX_DIGEST"
           test ! -e "$DOCKER_CONFIG/config.json"
+
   promote:
     name: promote
     needs: [build, verify]

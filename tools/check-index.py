@@ -29,6 +29,11 @@ class Refusal(Exception):
         self.detail = detail
 
 
+class ArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise RuntimeError(message)
+
+
 def refuse(predicate: str, detail: str) -> NoReturn:
     raise Refusal(predicate, detail)
 
@@ -77,7 +82,6 @@ def validate(args: argparse.Namespace) -> None:
         refuse("descriptor-count", "index must contain exactly four descriptors")
 
     runnable: dict[tuple[str, str], str] = {}
-    attestations: dict[str, str] = {}
     for descriptor in manifests:
         if not isinstance(descriptor, dict):
             refuse("runnable-platforms", "every descriptor must be an object")
@@ -85,13 +89,7 @@ def validate(args: argparse.Namespace) -> None:
         if not isinstance(digest, str) or DIGEST_RE.fullmatch(digest) is None:
             refuse("runnable-platforms", f"invalid descriptor digest: {digest!r}")
         annotations = descriptor.get("annotations") or {}
-        if not isinstance(annotations, dict):
-            refuse("attestation-per-child", "descriptor annotations must be an object")
-        if annotations.get("vnd.docker.reference.type") == "attestation-manifest":
-            subject = annotations.get("vnd.docker.reference.digest")
-            if not isinstance(subject, str) or subject in attestations:
-                refuse("attestation-per-child", f"invalid or duplicate attestation subject: {subject!r}")
-            attestations[subject] = digest
+        if isinstance(annotations, dict) and annotations.get("vnd.docker.reference.type") == "attestation-manifest":
             continue
         platform = descriptor.get("platform") or {}
         if not isinstance(platform, dict):
@@ -102,37 +100,75 @@ def validate(args: argparse.Namespace) -> None:
         runnable[key] = digest
     if set(runnable) != {("linux", "amd64"), ("linux", "arm64")}:
         refuse("runnable-platforms", f"runnable platform set mismatch: {sorted(runnable)!r}")
+
+    attestations: dict[str, str] = {}
+    for descriptor in manifests:
+        annotations = descriptor.get("annotations") or {}
+        if not isinstance(annotations, dict):
+            refuse("attestation-per-child", "descriptor annotations must be an object")
+        if annotations.get("vnd.docker.reference.type") != "attestation-manifest":
+            continue
+        subject = annotations.get("vnd.docker.reference.digest")
+        if not isinstance(subject, str) or subject in attestations:
+            refuse("attestation-per-child", f"invalid or duplicate attestation subject: {subject!r}")
+        attestations[subject] = descriptor["digest"]
     if set(attestations) != set(runnable.values()):
         refuse("attestation-per-child", "each runnable child must have exactly one attestation manifest")
 
-    statements: dict[str, bytes] = {}
+    attestation_manifests: dict[str, dict] = {}
     for arch in ("amd64", "arm64"):
         child = runnable[("linux", arch)]
-        attestation = load_json(
+        attestation_manifests[arch] = load_json(
             crane(crane_path, "manifest", args.image, attestations[child]),
             f"{arch} attestation manifest",
         )
-        layers = attestation.get("layers")
-        if not isinstance(layers, list) or len(layers) != 1:
+
+    layers: dict[str, dict] = {}
+    for arch in ("amd64", "arm64"):
+        candidate_layers = attestation_manifests[arch].get("layers")
+        if not isinstance(candidate_layers, list) or len(candidate_layers) != 1:
             refuse("layer-count", f"{arch} attestation must contain exactly one layer")
-        layer = layers[0]
+        layers[arch] = candidate_layers[0]
+
+    for arch in ("amd64", "arm64"):
+        layer = layers[arch]
         if not isinstance(layer, dict) or layer.get("mediaType") != "application/vnd.in-toto+json":
             refuse("layer-media-type", f"{arch} attestation layer is not in-toto JSON")
-        annotations = layer.get("annotations") or {}
+
+    for arch in ("amd64", "arm64"):
+        annotations = layers[arch].get("annotations") or {}
         if not isinstance(annotations, dict) or annotations.get("in-toto.io/predicate-type") != "https://spdx.dev/Document":
             refuse("predicate-annotation", f"{arch} attestation layer is not annotated as SPDX")
-        layer_digest = layer.get("digest")
+
+    layer_digests: dict[str, str] = {}
+    for arch in ("amd64", "arm64"):
+        layer_digest = layers[arch].get("digest")
         if not isinstance(layer_digest, str) or DIGEST_RE.fullmatch(layer_digest) is None:
             refuse("layer-digest", f"invalid {arch} attestation layer digest: {layer_digest!r}")
-        raw_statement = crane(crane_path, "blob", args.image, layer_digest)
-        statement = load_json(raw_statement, f"{arch} SPDX statement")
+        layer_digests[arch] = layer_digest
+
+    statements: dict[str, bytes] = {}
+    statement_objects: dict[str, dict] = {}
+    for arch in ("amd64", "arm64"):
+        raw_statement = crane(crane_path, "blob", args.image, layer_digests[arch])
+        statements[arch] = raw_statement
+        statement_objects[arch] = load_json(raw_statement, f"{arch} SPDX statement")
+
+    for arch in ("amd64", "arm64"):
+        statement = statement_objects[arch]
         if statement.get("_type") not in {
             "https://in-toto.io/Statement/v0.1",
             "https://in-toto.io/Statement/v1",
         }:
             refuse("statement-type", f"{arch} SBOM is not an in-toto statement")
-        if statement.get("predicateType") != "https://spdx.dev/Document":
+
+    for arch in ("amd64", "arm64"):
+        if statement_objects[arch].get("predicateType") != "https://spdx.dev/Document":
             refuse("predicate-type", f"{arch} SBOM predicate type is not SPDX")
+
+    for arch in ("amd64", "arm64"):
+        child = runnable[("linux", arch)]
+        statement = statement_objects[arch]
         subjects = statement.get("subject")
         expected_hex = child.removeprefix("sha256:")
         if (
@@ -143,15 +179,22 @@ def validate(args: argparse.Namespace) -> None:
             or subjects[0]["digest"].get("sha256") != expected_hex
         ):
             refuse("subject", f"{arch} SBOM subject does not bind the runnable child")
-        predicate = statement.get("predicate")
+
+    predicates: dict[str, dict] = {}
+    for arch in ("amd64", "arm64"):
+        predicate = statement_objects[arch].get("predicate")
         if not isinstance(predicate, dict) or predicate.get("spdxVersion") != "SPDX-2.3":
             refuse("spdx-version", f"{arch} predicate is not SPDX 2.3")
-        if predicate.get("SPDXID") != "SPDXRef-DOCUMENT":
+        predicates[arch] = predicate
+
+    for arch in ("amd64", "arm64"):
+        if predicates[arch].get("SPDXID") != "SPDXRef-DOCUMENT":
             refuse("spdx-id", f"{arch} SPDX document identifier is invalid")
-        packages = predicate.get("packages")
+
+    for arch in ("amd64", "arm64"):
+        packages = predicates[arch].get("packages")
         if not isinstance(packages, list) or not packages:
             refuse("packages", f"{arch} SPDX package inventory is empty")
-        statements[arch] = raw_statement
 
     if args.sbom_dir is not None:
         args.sbom_dir.mkdir(parents=True, exist_ok=True)
@@ -165,7 +208,7 @@ def validate(args: argparse.Namespace) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
+    parser = ArgumentParser()
     parser.add_argument("image")
     parser.add_argument("index_digest")
     parser.add_argument("--sbom-dir", type=Path)
@@ -181,7 +224,8 @@ def main() -> int:
         print(f"check-index: refused: {error.predicate}: {error.detail}", file=sys.stderr)
         return 1
     except Exception as error:
-        print(f"check-index: error: {error}", file=sys.stderr)
+        detail = str(error).replace("\r", r"\r").replace("\n", r"\n")
+        print(f"check-index: error: {detail}", file=sys.stderr)
         return 2
     return 0
 

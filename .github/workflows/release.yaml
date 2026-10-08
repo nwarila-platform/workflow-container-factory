@@ -1,4 +1,4 @@
-# Purpose: accept one signed container release tag and call the isolated reusable builder.
+# Purpose: accept one signed container release tag, call the isolated reusable builder, then publish its GitHub Release.
 
 name: Release
 

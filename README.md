@@ -29,9 +29,10 @@ job reports the combined result.
 The runner acceptance workflow calls the organization runner at a pinned commit with released
 images: one must pass and four must be refused.
 
-A conventional commit that changes `containers/<name>/` makes release-please open or update that
-container's release pull request. Merging the pull request creates a signed annotated tag named
-`<name>/v<X.Y.Z>`. The tagging job runs in the `release` environment, which is restricted to `main`,
+A `feat` or `fix` commit, or a breaking change, that changes `containers/<name>/` makes release-please
+open or update that container's release pull request. Types that release-please leaves out of the
+changelog, such as `docs` or `chore`, do not. Merging the pull request creates a signed annotated tag
+named `<name>/v<X.Y.Z>`. The tagging job runs in the `release` environment, which is restricted to `main`,
 and pushes over SSH with the repository's release deploy key. That push starts the release workflow.
 The tag rules allow only repository admins and that deploy key to create a release tag, so an admin
 can still push a signed tag by hand as a fallback.

@@ -64,39 +64,67 @@ jobs:
           test "$(wc -l < "$work/numbers")" -eq "$(wc -l < "$work/unique-numbers")"
           while read -r number; do
             pr="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}")"
-            if ! jq -e --arg repository "$GITHUB_REPOSITORY" '
-              .state == "open" and
-              .user.login == "github-actions[bot]" and
-              .head.repo.full_name == $repository and
-              .head.repo.fork == false and
-              (.head.ref | startswith("release-please--branches--main--components--")) and
-              any(.labels[]; .name == "autorelease: pending")
-            ' <<< "$pr" >/dev/null; then
-              printf 'refusing release PR run candidates: pr=%s pr-predicates=refused\n' "$number"
+            pr_ok=true
+            pr_predicate() {
+              local predicate="$1" expression="$2" result
+              if jq -e --arg repository "$GITHUB_REPOSITORY" "$expression" <<< "$pr" >/dev/null; then
+                result=passed
+              else
+                result=refused
+                pr_ok=false
+              fi
+              printf 'release PR selector: pr=%s predicate=%s result=%s\n' "$number" "$predicate" "$result"
+            }
+            printf 'release PR selector: pr=%s predicate=invocation-candidate result=passed\n' "$number"
+            pr_predicate state-open '.state == "open"'
+            pr_predicate author-actions-bot '.user.login == "github-actions[bot]"'
+            pr_predicate head-repository ".head.repo.full_name == \$repository"
+            pr_predicate non-fork '.head.repo.fork == false'
+            pr_predicate branch-prefix '(.head.ref | startswith("release-please--branches--main--components--"))'
+            pr_predicate pending-label 'any(.labels[]; .name == "autorelease: pending")'
+            if test "$pr_ok" != true; then
               continue
             fi
-            printf 'release PR selector: pr=%s pr-predicates=passed\n' "$number"
             branch="$(jq -r '.head.ref' <<< "$pr")"
             sha="$(jq -r '.head.sha' <<< "$pr")"
             repo_id="$(jq -r '.head.repo.id' <<< "$pr")"
             runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?branch=${branch}&event=pull_request&per_page=100" --paginate --slurp)"
-            jq -c --argjson number "$number" --argjson repo_id "$repo_id" --arg branch "$branch" --arg sha "$sha" '
-              [.[].workflow_runs[] | select(
-                .event == "pull_request" and
-                .status == "completed" and
-                .conclusion == "action_required" and
-                .head_branch == $branch and
-                .head_sha == $sha and
-                .actor.login == "github-actions[bot]" and
-                any(.pull_requests[];
-                  .number == $number and
-                  .head.repo.id == $repo_id and
-                  .head.sha == $sha
-                )
-              )][]
-            ' <<< "$runs" > "$work/runs"
+            jq -c '.[].workflow_runs[]' <<< "$runs" > "$work/runs"
             while read -r run; do
-              run_id="$(jq -r '.id' <<< "$run")"
+              run_id="$(jq -r '
+                if type == "object" and ((.id | type) == "number") then (.id | tostring) else "invalid" end
+              ' <<< "$run")"
+              run_ok=true
+              run_predicate() {
+                local predicate="$1" expression="$2" result
+                if jq -e --argjson number "$number" --argjson repo_id "$repo_id" \
+                  --arg branch "$branch" --arg sha "$sha" "$expression" <<< "$run" >/dev/null; then
+                  result=passed
+                else
+                  result=refused
+                  run_ok=false
+                fi
+                printf 'release PR run selector: pr=%s run=%s predicate=%s result=%s\n' \
+                  "$number" "$run_id" "$predicate" "$result"
+              }
+              run_predicate run-id '(.id | type) == "number" and .id > 0'
+              run_predicate event '.event == "pull_request"'
+              run_predicate status '.status == "completed"'
+              run_predicate conclusion '.conclusion == "action_required"'
+              run_predicate head-branch ".head_branch == \$branch"
+              run_predicate head-sha ".head_sha == \$sha"
+              run_predicate actor-actions-bot '.actor.login == "github-actions[bot]"'
+              run_predicate pull-request-association "
+                (.pull_requests | type) == \"array\" and
+                any(.pull_requests[];
+                  .number == \$number and
+                  .head.repo.id == \$repo_id and
+                  .head.sha == \$sha
+                )
+              "
+              if test "$run_ok" != true; then
+                continue
+              fi
               printf 'approving release PR run: pr=%s run=%s predicates=passed\n' "$number" "$run_id"
               status="$(curl --silent --show-error --output "$work/response" --write-out '%{http_code}' \
                 --request POST \

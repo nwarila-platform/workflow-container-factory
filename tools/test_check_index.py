@@ -117,6 +117,15 @@ def run(data: dict[str, dict], extra: list[str] | None = None) -> subprocess.Com
         return subprocess.run(command, env=env, text=True, capture_output=True, check=False)
 
 
+def run_cli(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["python3", str(CHECKER), *arguments],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 def mutations() -> list[tuple[str, Callable[[dict[str, dict]], None]]]:
     return [
         ("media-type", lambda d: d["manifests"][INDEX_DIGEST].update(mediaType="application/json")),
@@ -151,6 +160,36 @@ def main() -> None:
         assert result.returncode == 1, (predicate, result.stdout, result.stderr)
         assert result.stdout == "", (predicate, result.stdout)
         assert result.stderr.startswith(f"check-index: refused: {predicate}: "), result.stderr
+
+    descriptor_faults = fixture()
+    descriptor_faults["manifests"][INDEX_DIGEST]["manifests"][0]["annotations"] = []
+    descriptor_faults["manifests"][INDEX_DIGEST]["manifests"][1]["platform"]["architecture"] = "s390x"
+    descriptor_result = run(descriptor_faults)
+    assert descriptor_result.returncode == 1, descriptor_result.stderr
+    assert descriptor_result.stderr.startswith("check-index: refused: runnable-platforms: "), descriptor_result.stderr
+
+    architecture_faults = fixture()
+    architecture_faults["manifests"][AMD64_ATT]["layers"][0]["mediaType"] = "application/json"
+    architecture_faults["manifests"][ARM64_ATT]["layers"].append(
+        copy.deepcopy(architecture_faults["manifests"][ARM64_ATT]["layers"][0])
+    )
+    architecture_result = run(architecture_faults)
+    assert architecture_result.returncode == 1, architecture_result.stderr
+    assert architecture_result.stderr.startswith("check-index: refused: layer-count: "), architecture_result.stderr
+
+    cli_cases = [
+        ([], "the following arguments are required: image, index_digest"),
+        ([IMAGE, INDEX_DIGEST, "--unknown-option"], "unrecognized arguments: --unknown-option"),
+        (
+            [IMAGE, INDEX_DIGEST, "--sbom-dir", "/tmp/check-index-unused", "--name", "example", "--version", "bad"],
+            "--sbom-dir requires a valid --version",
+        ),
+    ]
+    for arguments, detail in cli_cases:
+        result = run_cli(arguments)
+        assert result.returncode == 2, (arguments, result.stdout, result.stderr)
+        assert result.stdout == "", (arguments, result.stdout)
+        assert result.stderr == f"check-index: error: {detail}\n", (arguments, result.stderr)
 
     with tempfile.TemporaryDirectory() as directory:
         output = Path(directory)

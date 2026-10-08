@@ -78,7 +78,6 @@ jobs:
             ahead|identical) ;;
             *) printf 'release commit is not reachable from main: %s\n' "$tag_commit" >&2; exit 1 ;;
           esac
-          test "$(gh api "repos/${GITHUB_REPOSITORY}/immutable-releases" --jq '.enabled')" = true
           {
             printf 'name=%s\n' "$name"
             printf 'version=%s\n' "$version"
@@ -173,7 +172,7 @@ jobs:
           if changelog.is_file():
               text = changelog.read_text(encoding="utf-8")
               match = re.search(
-                  rf"(?ms)^## (?:\[)?{re.escape(version)}(?:\])?.*?(?=^## |\Z)",
+                  rf"(?ms)^## (?:\[{re.escape(version)}\](?=\(|[ \t]|$)|{re.escape(version)}(?=[ \t]|$)).*?(?=^## |\Z)",
                   text,
               )
               if match is not None:
@@ -213,21 +212,58 @@ jobs:
             "${NAME}-${VERSION}-linux-arm64.spdx.json" \
             "${NAME}-${VERSION}-provenance.sigstore.json" \
             | sort > "$expected"
-          encoded_tag="${TAG//\//%2F}"
-          error_file="$RELEASE_WORK/release.stderr"
-          if release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${encoded_tag}" 2> "$error_file")"; then
+          find_release_id() {
+            local pages matches count
+            pages="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --paginate --slurp)"
+            matches="$(jq -c --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)]' <<< "$pages")"
+            count="$(jq 'length' <<< "$matches")"
+            if test "$count" -gt 1; then
+              printf 'refusing duplicate releases for tag: %s\n' "$TAG" >&2
+              exit 1
+            fi
+            if test "$count" -eq 1; then
+              jq -er '.[0].id | select(type == "number" and . > 0)' <<< "$matches"
+            fi
+          }
+          read_release() {
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}"
+          }
+          upload_asset() {
+            local file="$1" name="$2" status
+            status="$(curl --silent --show-error --output "$RELEASE_WORK/upload-response" --write-out '%{http_code}' \
+              --request POST \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'Content-Type: application/octet-stream' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              --data-binary "@${file}" \
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${name}")"
+            if test "$status" != 201; then
+              cat "$RELEASE_WORK/upload-response" >&2
+              printf 'release asset upload returned HTTP %s, expected 201\n' "$status" >&2
+              exit 1
+            fi
+          }
+
+          release_id="$(find_release_id)"
+          if test -n "$release_id"; then
+            release="$(read_release)"
             state="$(jq -r 'if .draft then "draft" else "published" end' <<< "$release")"
-          elif grep -Eiq 'HTTP 404|Not Found' "$error_file"; then
-            state=absent
           else
-            cat "$error_file" >&2
-            exit 1
+            state=absent
           fi
 
           if test "$state" = absent; then
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
               --target "$TAG_COMMIT" --title "${NAME} ${VERSION}" --notes-file "$RELEASE_WORK/notes.md"
-            release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${encoded_tag}")"
+            release_id=""
+            for attempt in 1 2 3 4 5; do
+              release_id="$(find_release_id)"
+              test -n "$release_id" && break
+              test "$attempt" -eq 5 || sleep 1
+            done
+            test -n "$release_id"
+            release="$(read_release)"
             state=draft
           fi
 
@@ -266,41 +302,51 @@ jobs:
 
           require_release_identity "$release"
           if test "$state" = draft; then
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --title "${NAME} ${VERSION}" --notes-file "$RELEASE_WORK/notes.md"
-            release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${encoded_tag}")"
+            jq -n --arg name "${NAME} ${VERSION}" --rawfile body "$RELEASE_WORK/notes.md" \
+              '{name: $name, body: $body}' > "$RELEASE_WORK/update-release.json"
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              --input "$RELEASE_WORK/update-release.json" >/dev/null
+            release="$(read_release)"
             require_release_identity "$release"
             require_release_metadata "$release"
             mkdir "$RELEASE_WORK/existing"
             while read -r asset; do
               expected_file="$assets/$asset"
               if jq -e --arg name "$asset" 'any(.assets[]; .name == $name)' <<< "$release" >/dev/null; then
-                gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$RELEASE_WORK/existing"
                 current="$RELEASE_WORK/existing/$asset"
+                asset_id="$(jq -er --arg name "$asset" '.assets[] | select(.name == $name) | .id' <<< "$release")"
+                gh api -H 'Accept: application/octet-stream' \
+                  "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "$current"
                 if ! compare_asset "$current" "$expected_file"; then
                   printf 'draft asset mismatch; replacing: %s\n' "$asset"
-                  gh release upload "$TAG" "$expected_file" --repo "$GITHUB_REPOSITORY" --clobber
+                  gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" >/dev/null
+                  upload_asset "$expected_file" "$asset"
                 fi
               else
-                gh release upload "$TAG" "$expected_file" --repo "$GITHUB_REPOSITORY"
+                upload_asset "$expected_file" "$asset"
               fi
             done < "$expected"
-            release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${encoded_tag}")"
+            release="$(read_release)"
             require_release_identity "$release"
             require_exact_assets "$release"
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+            printf '{"draft":false}\n' > "$RELEASE_WORK/publish-release.json"
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              --input "$RELEASE_WORK/publish-release.json" >/dev/null
           else
             jq -e '.draft == false and .immutable == true' <<< "$release" >/dev/null
             require_release_metadata "$release"
             require_exact_assets "$release"
             mkdir "$RELEASE_WORK/published"
-            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RELEASE_WORK/published"
             while read -r asset; do
-              compare_asset "$RELEASE_WORK/published/$asset" "$assets/$asset"
+              current="$RELEASE_WORK/published/$asset"
+              asset_id="$(jq -er --arg name "$asset" '.assets[] | select(.name == $name) | .id' <<< "$release")"
+              gh api -H 'Accept: application/octet-stream' \
+                "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "$current"
+              compare_asset "$current" "$assets/$asset"
             done < "$expected"
           fi
 
-          release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${encoded_tag}")"
+          release="$(read_release)"
           require_release_identity "$release"
           jq -e '.draft == false and .immutable == true' <<< "$release" >/dev/null
           require_release_metadata "$release"
