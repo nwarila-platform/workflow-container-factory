@@ -17,14 +17,17 @@ CI checks these labels on locally built images, and the release checks every can
 ## Layout
 
 Each `containers/<name>/` directory holds a `Containerfile`, a `VERSION`, tests, and a bundled
-example. Shared release tools live in `tools/`. The workflows under `.github/workflows/` discover
-containers from this layout.
+example. Shared release tools live in `tools/`. The build and release workflows under
+`.github/workflows/` discover containers from this layout.
 
 ## Checks and releases
 
 CI runs on every pull request and every push to `main`. It runs each container's host tests. At the
 same time, it builds and tests the container's image on `amd64` and `arm64`. The stable `CI result`
 job reports the combined result.
+
+The runner acceptance workflow calls the organization runner at a pinned commit with released
+images: one must pass and four must be refused.
 
 A release starts with a signed annotated tag named `<name>/v<X.Y.Z>`. The release workflow checks
 the tag and the container's `VERSION`. It then builds a candidate image and pushes it by digest
