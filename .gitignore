@@ -69,7 +69,6 @@
 !/.github/workflows/ci.yaml
 !/.github/workflows/release.yaml
 !/.github/workflows/build.yaml
-!/.github/workflows/github-release.yaml
 !/.github/workflows/release-please.yaml
 !/.github/workflows/runner-acceptance.yaml
 !/.github/renovate.json5
@@ -80,6 +79,7 @@
 !/tools/check-labels.sh
 !/tools/check-index.py
 !/tools/test_check_index.py
+!/tools/github-release.sh
 
 # Documents and repository settings.
 !/README.md

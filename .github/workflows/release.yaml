@@ -1,4 +1,4 @@
-# Purpose: accept one signed container release tag, call the isolated reusable builder, then publish its GitHub Release.
+# Purpose: accept one signed container release tag, then build, sign, attest, verify, and promote its image.
 
 name: Release
 
@@ -102,14 +102,3 @@ jobs:
       id-token: write
       attestations: write
       artifact-metadata: write
-
-  github-release:
-    name: github release
-    needs: [tag, build]
-    uses: ./.github/workflows/github-release.yaml
-    with:
-      name: ${{ needs.tag.outputs.name }}
-      version: ${{ needs.tag.outputs.version }}
-    permissions:
-      contents: write
-      attestations: read
