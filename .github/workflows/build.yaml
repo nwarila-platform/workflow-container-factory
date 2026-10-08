@@ -207,6 +207,20 @@ jobs:
               output.write(f"arm64-digest={runnable[('linux', 'arm64')]}\n")
           print(f"candidate index: {image}@{index_digest}")
           PY
+      - name: Validate requirement labels
+        env:
+          AMD64_DIGEST: ${{ steps.candidate.outputs.amd64-digest }}
+          ARM64_DIGEST: ${{ steps.candidate.outputs.arm64-digest }}
+          NAME: ${{ inputs.name }}
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          image="ghcr.io/nwarila-platform/workflow-${NAME}"
+          for child in "$AMD64_DIGEST" "$ARM64_DIGEST"; do
+            crane config "${image}@${child}" | jq .config > "$work/config.json"
+            bash tools/check-labels.sh "$work/config.json"
+          done
 
   test:
     name: test candidate

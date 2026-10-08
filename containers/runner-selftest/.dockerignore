@@ -1,0 +1,4 @@
+# Only the Python package enters the build context.
+*
+!runner_selftest/
+runner_selftest/__pycache__/

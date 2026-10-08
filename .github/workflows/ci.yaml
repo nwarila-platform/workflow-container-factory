@@ -137,6 +137,16 @@ jobs:
           BUILDER: ${{ steps.buildx.outputs.name }}
           NAME: ${{ matrix.name }}
         run: docker buildx build --builder "$BUILDER" -f "containers/$NAME/Containerfile" --platform "linux/$ARCH" --tag "workflow-container:ci-$NAME-$ARCH" --load "containers/$NAME"
+      - name: Validate requirement labels
+        env:
+          ARCH: ${{ matrix.arch }}
+          NAME: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          config=$(mktemp)
+          trap 'rm -f "$config"' EXIT
+          docker image inspect "workflow-container:ci-${NAME}-${ARCH}" --format '{{json .Config}}' > "$config"
+          bash tools/check-labels.sh "$config"
       - name: Image tests
         env:
           ARCH: ${{ matrix.arch }}
