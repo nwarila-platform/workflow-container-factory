@@ -43,13 +43,13 @@ run "${security[@]}" --volume "$work/example/workspace:/workspace:ro" \
 diff <(printf '%s\n' 'ok: user' 'ok: capabilities' 'ok: no-new-privileges' 'ok: network' \
   'ok: root read-only' 'ok: workspace readable' 'ok: workspace read-only' \
   'ok: template readable: example/template' 'ok: template read-only: example/template' \
-  'ok: scratch' 'runner-selftest: PASS (10 checks)') "$work/report" || fail "pass report differs"
+  'ok: scratch' 'ok: home scratch' 'runner-selftest: PASS (11 checks)') "$work/report" || fail "pass report differs"
 
 run "${security[@]}" --volume "$work/example/workspace:/workspace:rw" \
   --volume "$work/example/template:/templates/0:ro" "${arguments[@]}"
 [[ $status -eq 1 ]] || fail "the writable workspace should fail"
 grep -q '^error: workspace read-only: ' "$work/report" || fail "workspace failure is absent"
-[[ $(tail -n 1 "$work/report") == "runner-selftest: FAIL (10 checks, 1 failed)" ]] || fail "fail summary differs"
+[[ $(tail -n 1 "$work/report") == "runner-selftest: FAIL (11 checks, 1 failed)" ]] || fail "fail summary differs"
 
 run "${security[@]}" "$image"
 [[ $status -eq 2 && ! -s "$work/report" ]] || fail "a usage error should exit with status 2 and print no report"
@@ -59,6 +59,6 @@ run --security-opt=no-new-privileges --tmpfs "/tmp:$tmp_options" \
   --volume "$work/example/template:/templates/0:ro" "${arguments[@]}"
 [[ $status -eq 1 ]] || fail "the invocation without dropped capabilities should fail"
 grep -q '^error: capabilities: CapBnd is ' "$work/report" || fail "capabilities failure is absent"
-[[ $(tail -n 1 "$work/report") == "runner-selftest: FAIL (10 checks, 1 failed)" ]] || fail "fail summary differs"
+[[ $(tail -n 1 "$work/report") == "runner-selftest: FAIL (11 checks, 1 failed)" ]] || fail "fail summary differs"
 
 echo "image tests passed: $image on $platform"

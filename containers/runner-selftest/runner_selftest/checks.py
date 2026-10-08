@@ -80,15 +80,19 @@ def readable(name: str, directory: Path) -> Result:
     return Result(name, detail)
 
 
-def scratch(tmp: Path = Path("/tmp"), mounts: Path = Path("/proc/self/mounts")) -> Result:
-    probe = tmp / ".runner-selftest-probe"
+def scratch(
+    name: str = "scratch",
+    directory: Path = Path("/tmp"),
+    mounts: Path = Path("/proc/self/mounts"),
+) -> Result:
+    probe = directory / ".runner-selftest-probe"
     try:
         probe.write_bytes(b"runner-selftest\n")
         if probe.read_bytes() != b"runner-selftest\n":
-            return Result("scratch", "probe contents changed")
+            return Result(name, f"{directory} probe contents changed")
         probe.unlink()
     except OSError as error:
-        return Result("scratch", f"scratch probe failed: {type(error).__name__}: {error}")
+        return Result(name, f"{directory} probe failed: {type(error).__name__}: {error}")
     finally:
         try:
             probe.unlink(missing_ok=True)
@@ -98,12 +102,13 @@ def scratch(tmp: Path = Path("/tmp"), mounts: Path = Path("/proc/self/mounts")) 
     options = None
     for line in mounts.read_text(encoding="ascii").splitlines():
         fields = line.split()
-        if len(fields) >= 4 and fields[1] == str(tmp):
+        if len(fields) >= 4 and fields[1] == str(directory):
             options = set(fields[3].split(","))
     if options is None:
-        return Result("scratch", f"{tmp} has no mount entry")
+        return Result(name, f"{directory} has no mount entry")
     missing = sorted({"nosuid", "nodev", "noexec"} - options)
-    return Result("scratch", None if not missing else f"missing mount options: {', '.join(missing)}")
+    detail = None if not missing else f"{directory} is missing mount options: {', '.join(missing)}"
+    return Result(name, detail)
 
 
 def run(workspace: Path, templates: list[tuple[str, Path]]) -> list[Result]:
@@ -120,4 +125,5 @@ def run(workspace: Path, templates: list[tuple[str, Path]]) -> list[Result]:
         results.append(readable(f"template readable: {label}", directory))
         results.append(read_only(f"template read-only: {label}", directory))
     results.append(scratch())
+    results.append(scratch("home scratch", Path("/home/nonroot")))
     return results
