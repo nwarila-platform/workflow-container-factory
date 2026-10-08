@@ -112,14 +112,17 @@ jobs:
             done < "$work/runs"
           done < "$work/unique-numbers"
 
-  tag-released-containers:
-    name: tag released containers
+  release-merge:
+    name: release merge
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
-      contents: write
-      pull-requests: write
-      actions: write
+      contents: read
+      pull-requests: read
+    outputs:
+      eligible: ${{ steps.pull-request.outputs.eligible }}
+      number: ${{ steps.pull-request.outputs.number }}
+      releases: ${{ steps.releases.outputs.releases }}
     steps:
       - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
@@ -155,23 +158,104 @@ jobs:
         with:
           fetch-depth: 2
           persist-credentials: false
-      - name: Create and dispatch verified release tags
+      - name: Select released containers
+        id: releases
         if: steps.pull-request.outputs.eligible == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse HEAD^)" = "$(git rev-parse HEAD^1)"
           old_manifest="$(mktemp)"
-          changed="$(mktemp)"
-          trap 'rm -f "$old_manifest" "$changed"' EXIT
+          selected="$(mktemp)"
+          trap 'rm -f "$old_manifest" "$selected"' EXIT
           git show HEAD^:.release-please-manifest.json > "$old_manifest"
-          jq -r --slurpfile old "$old_manifest" '
-            to_entries[] | select($old[0][.key] != .value) | [.key, .value] | @tsv
-          ' .release-please-manifest.json > "$changed"
-          test -s "$changed"
+          python3 - "$old_manifest" "$selected" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          old = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          current = json.loads(Path(".release-please-manifest.json").read_text(encoding="utf-8"))
+          name_pattern = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+          version_pattern = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
+          releases = []
+          for package, version in current.items():
+              if old.get(package) == version:
+                  continue
+              match = re.fullmatch(r"containers/([a-z0-9]+(?:-[a-z0-9]+)*)", package)
+              if match is None:
+                  raise SystemExit(f"invalid release package: {package!r}")
+              name = match.group(1)
+              if name_pattern.fullmatch(name) is None or len(name) > 91:
+                  raise SystemExit(f"invalid container name: {name!r}")
+              if not isinstance(version, str) or version_pattern.fullmatch(version) is None:
+                  raise SystemExit(f"invalid container version: {version!r}")
+              raw = Path("containers", name, "VERSION").read_bytes()
+              if raw != f"{version}\n".encode("ascii"):
+                  raise SystemExit(f"containers/{name}/VERSION must be exactly {version!r} and one LF")
+              releases.append({"name": name, "version": version})
+          if not releases:
+              raise SystemExit("merged release pull request changed no container versions")
+          Path(sys.argv[2]).write_text(json.dumps(releases, separators=(",", ":")), encoding="ascii")
+          PY
+          printf 'releases=%s\n' "$(cat "$selected")" >> "$GITHUB_OUTPUT"
+
+  tag-released-containers:
+    name: tag released containers
+    needs: release-merge
+    if: needs.release-merge.outputs.eligible == 'true'
+    environment: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Create and push verified release tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASES: ${{ needs.release-merge.outputs.releases }}
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_TAG_DEPLOY_KEY: ${{ secrets.RELEASE_TAG_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          selected="${RUNNER_TEMP}/released-containers"
+          python3 - "$selected" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          try:
+              releases = json.loads(os.environ["RELEASES"])
+          except (KeyError, json.JSONDecodeError) as error:
+              raise SystemExit(f"invalid released containers output: {error}") from error
+          if not isinstance(releases, list) or not releases:
+              raise SystemExit("released containers output must be a non-empty array")
+          name_pattern = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+          version_pattern = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
+          lines = []
+          for release in releases:
+              if not isinstance(release, dict) or set(release) != {"name", "version"}:
+                  raise SystemExit("invalid released container object")
+              name = release["name"]
+              version = release["version"]
+              if not isinstance(name, str) or name_pattern.fullmatch(name) is None or len(name) > 91:
+                  raise SystemExit(f"invalid container name: {name!r}")
+              if not isinstance(version, str) or version_pattern.fullmatch(version) is None:
+                  raise SystemExit(f"invalid container version: {version!r}")
+              lines.append(f"{name}\t{version}\n")
+          Path(sys.argv[1]).write_text("".join(lines), encoding="ascii")
+          PY
 
           key_file="${RUNNER_TEMP}/release-signing-key"
           install -m 0600 /dev/null "$key_file"
@@ -181,13 +265,17 @@ jobs:
           git config user.name NWarila
           git config user.email 33955773+NWarila@users.noreply.github.com
 
-          while IFS=$'\t' read -r package version; do
-            [[ "$package" =~ ^containers/([a-z0-9]+(-[a-z0-9]+)*)$ ]]
-            name="${BASH_REMATCH[1]}"
+          deploy_key_file="${RUNNER_TEMP}/release-tag-deploy-key"
+          known_hosts_file="${RUNNER_TEMP}/github-known-hosts"
+          install -m 0600 /dev/null "$deploy_key_file"
+          printf '%s\n' "$RELEASE_TAG_DEPLOY_KEY" > "$deploy_key_file"
+          install -m 0600 /dev/null "$known_hosts_file"
+          gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$known_hosts_file"
+
+          while IFS=$'\t' read -r name version; do
+            [[ "$name" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]
             (( ${#name} <= 91 ))
             [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-            test "$(cat "containers/${name}/VERSION")" = "$version"
-            test "$(wc -l < "containers/${name}/VERSION")" -eq 1
             tag="${name}/v${version}"
             error_file="$(mktemp)"
             if ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" 2> "$error_file")"; then
@@ -199,7 +287,8 @@ jobs:
               printf 'verified release tag already exists: %s\n' "$tag"
             elif grep -Eiq 'HTTP 404|Not Found' "$error_file"; then
               git tag -s "$tag" "$GITHUB_SHA" -m "$tag"
-              git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${tag}"
+              GIT_SSH_COMMAND="ssh -i ${deploy_key_file} -o IdentitiesOnly=yes -o UserKnownHostsFile=${known_hosts_file} -o StrictHostKeyChecking=yes" \
+                git push "git@github.com:${GITHUB_REPOSITORY}.git" "refs/tags/${tag}"
               ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
               test "$(jq -r '.object.type' <<< "$ref")" = tag
               object="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/$(jq -r '.object.sha' <<< "$ref")")"
@@ -211,13 +300,11 @@ jobs:
               exit 1
             fi
             rm -f "$error_file"
-            gh workflow run release.yaml --repo "$GITHUB_REPOSITORY" --ref "refs/tags/${tag}"
-          done < "$changed"
+          done < "$selected"
       - name: Mark the release pull request tagged
-        if: steps.pull-request.outputs.eligible == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ steps.pull-request.outputs.number }}
+          PR_NUMBER: ${{ needs.release-merge.outputs.number }}
         run: |
           set -euo pipefail
           gh api --method DELETE "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels/autorelease%3A%20pending" >/dev/null

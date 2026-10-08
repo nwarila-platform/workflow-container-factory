@@ -11,12 +11,8 @@ on:
       version:
         required: true
         type: string
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing signed release tag to backfill
-        required: true
-        type: string
+  repository_dispatch:
+    types: [backfill-release]
 
 permissions:
   contents: read
@@ -40,12 +36,14 @@ jobs:
         env:
           CALL_NAME: ${{ inputs.name }}
           CALL_VERSION: ${{ inputs.version }}
-          DISPATCH_TAG: ${{ inputs.tag }}
+          DISPATCH_TAG: ${{ github.event.client_payload.tag }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if test "$GITHUB_EVENT_NAME" = workflow_dispatch; then
+          if test "$GITHUB_EVENT_NAME" = repository_dispatch; then
             tag="$DISPATCH_TAG"
+            test "$GITHUB_REF" = refs/heads/main
+            test "$GITHUB_REF_NAME" = main
           else
             tag="${CALL_NAME}/v${CALL_VERSION}"
           fi
@@ -56,20 +54,24 @@ jobs:
           name="${BASH_REMATCH[1]}"
           version="${BASH_REMATCH[3]}"
           (( ${#name} <= 91 ))
-          if test "$GITHUB_EVENT_NAME" != workflow_dispatch; then
+          if test "$GITHUB_EVENT_NAME" != repository_dispatch; then
             test "$CALL_NAME" = "$name"
             test "$CALL_VERSION" = "$version"
+            test "$GITHUB_REF" = "refs/tags/${tag}"
+            test "$GITHUB_REF_NAME" = "$tag"
           fi
-          test "$GITHUB_REF" = "refs/tags/${tag}"
-          test "$GITHUB_REF_NAME" = "$tag"
           ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
-          test "$(jq -r '.ref' <<< "$ref_json")" = "$GITHUB_REF"
+          test "$(jq -r '.ref' <<< "$ref_json")" = "refs/tags/${tag}"
           test "$(jq -r '.object.type' <<< "$ref_json")" = tag
           tag_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/$(jq -r '.object.sha' <<< "$ref_json")")"
           tag_commit="$(jq -r '.object.sha' <<< "$tag_json")"
-          jq -e --arg tag "$tag" --arg sha "$GITHUB_SHA" '
-            .tag == $tag and .object.type == "commit" and .object.sha == $sha and .verification.verified == true
+          jq -e --arg tag "$tag" '
+            .tag == $tag and .object.type == "commit" and
+            (.object.sha | test("^[0-9a-f]{40}$")) and .verification.verified == true
           ' <<< "$tag_json" >/dev/null
+          if test "$GITHUB_EVENT_NAME" != repository_dispatch; then
+            test "$tag_commit" = "$GITHUB_SHA"
+          fi
           comparison="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${tag_commit}...main")"
           test "$(jq -r '.base_commit.sha' <<< "$comparison")" = "$tag_commit"
           case "$(jq -r '.status' <<< "$comparison")" in
@@ -104,6 +106,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NAME: ${{ steps.release.outputs.name }}
           TAG: ${{ steps.release.outputs.tag }}
+          TAG_COMMIT: ${{ steps.release.outputs.tag-commit }}
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
@@ -129,7 +132,7 @@ jobs:
               --certificate-identity "$identity" \
               --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
               --certificate-github-workflow-repository nwarila-platform/workflow-container-factory \
-              --certificate-github-workflow-sha "$GITHUB_SHA" \
+              --certificate-github-workflow-sha "$TAG_COMMIT" \
               --certificate-github-workflow-ref "refs/tags/${TAG}"
           done
           gh attestation verify "oci://${image}@${index_digest}" \
@@ -248,6 +251,13 @@ jobs:
               .tag_name == $tag and .target_commitish == $target
             ' <<< "$data" >/dev/null
           }
+          require_release_metadata() {
+            local data="$1"
+            jq -e --arg title "${NAME} ${VERSION}" \
+              --arg image "ghcr.io/nwarila-platform/workflow-${NAME}@${INDEX_DIGEST}" '
+              .name == $title and ((.body // "") | contains($image))
+            ' <<< "$data" >/dev/null
+          }
           require_exact_assets() {
             local data="$1"
             jq -r '.assets[].name' <<< "$data" | sort > "$RELEASE_WORK/observed-names"
@@ -256,6 +266,11 @@ jobs:
 
           require_release_identity "$release"
           if test "$state" = draft; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "${NAME} ${VERSION}" --notes-file "$RELEASE_WORK/notes.md"
+            release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${encoded_tag}")"
+            require_release_identity "$release"
+            require_release_metadata "$release"
             mkdir "$RELEASE_WORK/existing"
             while read -r asset; do
               expected_file="$assets/$asset"
@@ -276,6 +291,7 @@ jobs:
             gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
           else
             jq -e '.draft == false and .immutable == true' <<< "$release" >/dev/null
+            require_release_metadata "$release"
             require_exact_assets "$release"
             mkdir "$RELEASE_WORK/published"
             gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RELEASE_WORK/published"
@@ -287,4 +303,5 @@ jobs:
           release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${encoded_tag}")"
           require_release_identity "$release"
           jq -e '.draft == false and .immutable == true' <<< "$release" >/dev/null
+          require_release_metadata "$release"
           require_exact_assets "$release"
