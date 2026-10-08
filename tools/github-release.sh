@@ -2,7 +2,9 @@
 # Publish immutable GitHub Release evidence for one verified container release tag.
 
 set -euo pipefail
+set -E
 shopt -s inherit_errexit
+trap 'printf "github-release: refused: check failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 repository=nwarila-platform/workflow-container-factory
 certificate_oidc_issuer=https://token.actions.githubusercontent.com
@@ -92,6 +94,11 @@ case $(jq -r '.status' <<< "$comparison") in
     ;;
 esac
 
+if ! git cat-file -e "${tag_commit}^{commit}" 2>/dev/null; then
+  printf 'github-release: refused: release commit %s is not in this checkout (shallow clone?)\n' "$tag_commit" >&2
+  exit 1
+fi
+
 immutable=$(gh api "repos/${repository}/immutable-releases")
 if test "$(jq -r '.enabled' <<< "$immutable")" != true; then
   printf 'github-release: refused: immutable releases are not enabled\n' >&2
@@ -110,7 +117,7 @@ export DOCKER_CONFIG=$release_work/docker
 image=ghcr.io/nwarila-platform/workflow-${name}
 index_digest=$(crane digest "${image}:${version}")
 [[ "$index_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-result=$(python3 tools/check-index.py \
+result=$(python3 -I tools/check-index.py \
   "$image" "$index_digest" --sbom-dir "$assets" --name "$name" --version "$version")
 printf '%s\n' "$result"
 amd64_digest=$(awk '$1 == "child" && $2 == "ok:" && $3 == "linux/amd64" { print $4 }' <<< "$result")
@@ -158,7 +165,7 @@ export RELEASE_NAME=$name
 export RELEASE_NOTES=$release_work/notes.md
 export RELEASE_TAG=$tag
 export RELEASE_VERSION=$version
-python3 - <<'PY'
+python3 -I - <<'PY'
 import os
 import re
 from pathlib import Path
@@ -208,7 +215,7 @@ find_release_id() {
     exit 1
   fi
   if test "$count" -eq 1; then
-    jq -er '.[0].id | select(type == "number" and . > 0)' <<< "$matches"
+    jq -er '.[0].id | select(type == "number" and . > 0 and floor == .)' <<< "$matches"
   fi
 }
 
@@ -218,10 +225,10 @@ read_release() {
 
 upload_asset() {
   local file=$1 asset_name=$2 status
-  status=$(curl --silent --show-error --output "$release_work/upload-response" --write-out '%{http_code}' \
+  status=$(curl --disable --silent --show-error --output "$release_work/upload-response" --write-out '%{http_code}' \
     --request POST \
     --header 'Accept: application/vnd.github+json' \
-    --header "Authorization: Bearer ${auth_token}" \
+    --header "@${auth_header}" \
     --header 'Content-Type: application/octet-stream' \
     --header 'X-GitHub-Api-Version: 2022-11-28' \
     --data-binary "@${file}" \
@@ -301,12 +308,20 @@ if test "$state" = draft; then
   require_release_identity "$release"
   require_release_metadata "$release"
   mkdir "$release_work/existing"
+  auth_header=$release_work/auth-header
+  install -m 0600 /dev/null "$auth_header"
   auth_token=$(gh auth token)
+  printf 'Authorization: Bearer %s\n' "$auth_token" > "$auth_header"
+  unset auth_token
   while read -r asset; do
     expected_file=$assets/$asset
     if jq -e --arg name "$asset" 'any(.assets[]; .name == $name)' <<< "$release" >/dev/null; then
       current=$release_work/existing/$asset
-      asset_id=$(jq -er --arg name "$asset" '.assets[] | select(.name == $name) | .id' <<< "$release")
+      asset_id=$(jq -er --arg name "$asset" '
+        [.assets[] | select(.name == $name)] |
+        select(length == 1) | .[0].id |
+        select(type == "number" and . > 0 and floor == .)
+      ' <<< "$release")
       gh api -H 'Accept: application/octet-stream' \
         "repos/${repository}/releases/assets/${asset_id}" > "$current"
       if ! compare_asset "$current" "$expected_file"; then
@@ -318,7 +333,7 @@ if test "$state" = draft; then
       upload_asset "$expected_file" "$asset"
     fi
   done < "$expected"
-  unset auth_token
+  rm -f -- "$auth_header"
   release=$(read_release)
   require_release_identity "$release"
   require_exact_assets "$release"
@@ -332,7 +347,11 @@ else
   mkdir "$release_work/published"
   while read -r asset; do
     current=$release_work/published/$asset
-    asset_id=$(jq -er --arg name "$asset" '.assets[] | select(.name == $name) | .id' <<< "$release")
+    asset_id=$(jq -er --arg name "$asset" '
+      [.assets[] | select(.name == $name)] |
+      select(length == 1) | .[0].id |
+      select(type == "number" and . > 0 and floor == .)
+    ' <<< "$release")
     gh api -H 'Accept: application/octet-stream' \
       "repos/${repository}/releases/assets/${asset_id}" > "$current"
     compare_asset "$current" "$assets/$asset"

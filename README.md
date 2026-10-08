@@ -43,18 +43,18 @@ architectures, signs and attests the candidate, verifies its evidence, and promo
 version and `sha-<commit>` tags. There is no `latest` tag.
 
 After that workflow succeeds, the repository owner publishes the immutable GitHub Release from a
-clean checkout at the current `main`:
+full, clean checkout of the current `main`:
 
 ```sh
 tools/github-release.sh '<name>/v<X.Y.Z>'
 ```
 
-The script requires `gh` authenticated as a repository admin, plus `crane`, `cosign`, `jq`, and
-`python3`. It verifies the signed tag, index and SBOMs, image signatures, and provenance before it
-creates, repairs, or verifies a release containing the index and child digests, both child-bound
-SPDX SBOM statements, and the GitHub provenance bundle. Publication is manual because GitHub blocks
-the Actions workflow token from creating a release for the protected tag in this organization. An
-organization-owned GitHub App is the intended way to automate this step later.
+The script requires `gh` authenticated as a repository admin, plus `git`, `crane`, `cosign`,
+`curl`, `jq`, and `python3`. It verifies the signed tag, index and SBOMs, image signatures, and
+provenance before it creates, repairs, or verifies a release containing the index and child digests,
+both child-bound SPDX SBOM statements, and the GitHub provenance bundle. Publication is manual
+because GitHub blocks the Actions workflow token from creating a release for the protected tag in this
+organization. An organization-owned GitHub App is the intended way to automate this step later.
 
 ## Verify template-drift 3.0.2
 
@@ -80,7 +80,8 @@ gh attestation verify "oci://ghcr.io/nwarila-platform/workflow-template-drift@${
 | runner-selftest | 1.0.0 | `ghcr.io/nwarila-platform/workflow-runner-selftest` |
 | template-drift | 3.0.2 | `ghcr.io/nwarila-platform/workflow-template-drift` |
 
-A version here is published when its release tag's run succeeds.
+A version here is released when its release tag's run succeeds; its GitHub Release follows when the
+owner runs `tools/github-release.sh`.
 
 ## Status
 
