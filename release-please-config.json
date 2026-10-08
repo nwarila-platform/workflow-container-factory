@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "simple",
+  "include-component-in-tag": true,
+  "include-v-in-tag": true,
+  "tag-separator": "/",
+  "separate-pull-requests": true,
+  "skip-github-release": true,
+  "packages": {
+    "containers/template-drift": {
+      "component": "template-drift",
+      "version-file": "VERSION"
+    },
+    "containers/runner-selftest": {
+      "component": "runner-selftest",
+      "version-file": "VERSION"
+    }
+  }
+}

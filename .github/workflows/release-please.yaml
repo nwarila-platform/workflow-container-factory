@@ -1,0 +1,340 @@
+# Purpose: maintain per-container release pull requests, sign their tags, and start releases.
+
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-pull-requests:
+    name: release pull requests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - name: Maintain release pull requests
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+      - name: Approve parked checks for this invocation's release pull requests
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRS: ${{ steps.release.outputs.prs }}
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          python3 - <<'PY' > "$work/numbers"
+          import json
+          import os
+
+          raw = os.environ.get("PRS")
+          if raw is None:
+              raise SystemExit("release-please prs output is absent")
+          try:
+              prs = json.loads(raw)
+          except json.JSONDecodeError as error:
+              raise SystemExit(f"release-please prs output is invalid JSON: {error}") from error
+          if not isinstance(prs, list):
+              raise SystemExit("release-please prs output is not an array")
+          for candidate in prs:
+              if not isinstance(candidate, dict) or type(candidate.get("number")) is not int or candidate["number"] <= 0:
+                  raise SystemExit("release-please prs output contains an invalid pull request object")
+              print(candidate["number"])
+          PY
+          sort -n -u "$work/numbers" > "$work/unique-numbers"
+          test "$(wc -l < "$work/numbers")" -eq "$(wc -l < "$work/unique-numbers")"
+          while read -r number; do
+            pr="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}")"
+            pr_ok=true
+            pr_predicate() {
+              local predicate="$1" expression="$2" result
+              if jq -e --arg repository "$GITHUB_REPOSITORY" "$expression" <<< "$pr" >/dev/null; then
+                result=passed
+              else
+                result=refused
+                pr_ok=false
+              fi
+              printf 'release PR selector: pr=%s predicate=%s result=%s\n' "$number" "$predicate" "$result"
+            }
+            printf 'release PR selector: pr=%s predicate=invocation-candidate result=passed\n' "$number"
+            pr_predicate state-open '.state == "open"'
+            pr_predicate author-actions-bot '.user.login == "github-actions[bot]"'
+            pr_predicate head-repository ".head.repo.full_name == \$repository"
+            pr_predicate non-fork '.head.repo.fork == false'
+            pr_predicate branch-prefix '(.head.ref | startswith("release-please--branches--main--components--"))'
+            pr_predicate pending-label 'any(.labels[]; .name == "autorelease: pending")'
+            if test "$pr_ok" != true; then
+              continue
+            fi
+            branch="$(jq -r '.head.ref' <<< "$pr")"
+            sha="$(jq -r '.head.sha' <<< "$pr")"
+            repo_id="$(jq -r '.head.repo.id' <<< "$pr")"
+            runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?branch=${branch}&event=pull_request&per_page=100" --paginate --slurp)"
+            jq -c '.[].workflow_runs[]' <<< "$runs" > "$work/runs"
+            while read -r run; do
+              run_id="$(jq -r '
+                if type == "object" and ((.id | type) == "number") then (.id | tostring) else "invalid" end
+              ' <<< "$run")"
+              run_ok=true
+              run_predicate() {
+                local predicate="$1" expression="$2" result
+                if jq -e --argjson number "$number" --argjson repo_id "$repo_id" \
+                  --arg branch "$branch" --arg sha "$sha" "$expression" <<< "$run" >/dev/null; then
+                  result=passed
+                else
+                  result=refused
+                  run_ok=false
+                fi
+                printf 'release PR run selector: pr=%s run=%s predicate=%s result=%s\n' \
+                  "$number" "$run_id" "$predicate" "$result"
+              }
+              run_predicate run-id '(.id | type) == "number" and .id > 0'
+              run_predicate event '.event == "pull_request"'
+              run_predicate status '.status == "completed"'
+              run_predicate conclusion '.conclusion == "action_required"'
+              run_predicate head-branch ".head_branch == \$branch"
+              run_predicate head-sha ".head_sha == \$sha"
+              run_predicate actor-actions-bot '.actor.login == "github-actions[bot]"'
+              run_predicate pull-request-association "
+                (.pull_requests | type) == \"array\" and
+                any(.pull_requests[];
+                  .number == \$number and
+                  .head.repo.id == \$repo_id and
+                  .head.sha == \$sha
+                )
+              "
+              if test "$run_ok" != true; then
+                continue
+              fi
+              printf 'approving release PR run: pr=%s run=%s predicates=passed\n' "$number" "$run_id"
+              status="$(curl --silent --show-error --output "$work/response" --write-out '%{http_code}' \
+                --request POST \
+                --header 'Accept: application/vnd.github+json' \
+                --header "Authorization: Bearer ${GH_TOKEN}" \
+                --header 'X-GitHub-Api-Version: 2022-11-28' \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/approve")"
+              if test "$status" != 201; then
+                cat "$work/response" >&2
+                printf 'run approval returned HTTP %s, expected 201\n' "$status" >&2
+                exit 1
+              fi
+            done < "$work/runs"
+          done < "$work/unique-numbers"
+
+  release-merge:
+    name: release merge
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      eligible: ${{ steps.pull-request.outputs.eligible }}
+      number: ${{ steps.pull-request.outputs.number }}
+      releases: ${{ steps.releases.outputs.releases }}
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - name: Identify a merged release pull request
+        id: pull-request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pulls="$(gh api -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls")"
+          matches="$(jq -c --arg repository "$GITHUB_REPOSITORY" --arg sha "$GITHUB_SHA" '[.[] | select(
+            .state == "closed" and
+            .merged_at != null and
+            .merge_commit_sha == $sha and
+            .base.ref == "main" and
+            .head.repo.full_name == $repository and
+            (.head.ref | startswith("release-please--branches--main--components--")) and
+            .user.login == "github-actions[bot]" and
+            any(.labels[]; .name == "autorelease: pending")
+          )]' <<< "$pulls")"
+          count="$(jq 'length' <<< "$matches")"
+          if test "$count" -eq 0; then
+            printf 'eligible=false\n' >> "$GITHUB_OUTPUT"
+            printf 'push is not a merged release-please pull request\n'
+            exit 0
+          fi
+          test "$count" -eq 1
+          printf 'eligible=true\n' >> "$GITHUB_OUTPUT"
+          printf 'number=%s\n' "$(jq -r '.[0].number' <<< "$matches")" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        if: steps.pull-request.outputs.eligible == 'true'
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Select released containers
+        id: releases
+        if: steps.pull-request.outputs.eligible == 'true'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          old_manifest="$(mktemp)"
+          selected="$(mktemp)"
+          trap 'rm -f "$old_manifest" "$selected"' EXIT
+          git show HEAD^:.release-please-manifest.json > "$old_manifest"
+          python3 - "$old_manifest" "$selected" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          old = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          current = json.loads(Path(".release-please-manifest.json").read_text(encoding="utf-8"))
+          name_pattern = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+          version_pattern = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
+          releases = []
+          for package, version in current.items():
+              if old.get(package) == version:
+                  continue
+              match = re.fullmatch(r"containers/([a-z0-9]+(?:-[a-z0-9]+)*)", package)
+              if match is None:
+                  raise SystemExit(f"invalid release package: {package!r}")
+              name = match.group(1)
+              if name_pattern.fullmatch(name) is None or len(name) > 91:
+                  raise SystemExit(f"invalid container name: {name!r}")
+              if not isinstance(version, str) or version_pattern.fullmatch(version) is None:
+                  raise SystemExit(f"invalid container version: {version!r}")
+              raw = Path("containers", name, "VERSION").read_bytes()
+              if raw != f"{version}\n".encode("ascii"):
+                  raise SystemExit(f"containers/{name}/VERSION must be exactly {version!r} and one LF")
+              releases.append({"name": name, "version": version})
+          if not releases:
+              raise SystemExit("merged release pull request changed no container versions")
+          Path(sys.argv[2]).write_text(json.dumps(releases, separators=(",", ":")), encoding="ascii")
+          PY
+          printf 'releases=%s\n' "$(cat "$selected")" >> "$GITHUB_OUTPUT"
+
+  tag-released-containers:
+    name: tag released containers
+    needs: release-merge
+    if: needs.release-merge.outputs.eligible == 'true'
+    environment: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Create and push verified release tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASES: ${{ needs.release-merge.outputs.releases }}
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_TAG_DEPLOY_KEY: ${{ secrets.RELEASE_TAG_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          selected="${RUNNER_TEMP}/released-containers"
+          python3 - "$selected" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          try:
+              releases = json.loads(os.environ["RELEASES"])
+          except (KeyError, json.JSONDecodeError) as error:
+              raise SystemExit(f"invalid released containers output: {error}") from error
+          if not isinstance(releases, list) or not releases:
+              raise SystemExit("released containers output must be a non-empty array")
+          name_pattern = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+          version_pattern = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
+          lines = []
+          for release in releases:
+              if not isinstance(release, dict) or set(release) != {"name", "version"}:
+                  raise SystemExit("invalid released container object")
+              name = release["name"]
+              version = release["version"]
+              if not isinstance(name, str) or name_pattern.fullmatch(name) is None or len(name) > 91:
+                  raise SystemExit(f"invalid container name: {name!r}")
+              if not isinstance(version, str) or version_pattern.fullmatch(version) is None:
+                  raise SystemExit(f"invalid container version: {version!r}")
+              lines.append(f"{name}\t{version}\n")
+          Path(sys.argv[1]).write_text("".join(lines), encoding="ascii")
+          PY
+
+          key_file="${RUNNER_TEMP}/release-signing-key"
+          install -m 0600 /dev/null "$key_file"
+          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$key_file"
+          git config gpg.format ssh
+          git config user.signingkey "$key_file"
+          git config user.name NWarila
+          git config user.email 33955773+NWarila@users.noreply.github.com
+
+          deploy_key_file="${RUNNER_TEMP}/release-tag-deploy-key"
+          known_hosts_file="${RUNNER_TEMP}/github-known-hosts"
+          install -m 0600 /dev/null "$deploy_key_file"
+          printf '%s\n' "$RELEASE_TAG_DEPLOY_KEY" > "$deploy_key_file"
+          install -m 0600 /dev/null "$known_hosts_file"
+          gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$known_hosts_file"
+
+          while IFS=$'\t' read -r name version; do
+            [[ "$name" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]
+            (( ${#name} <= 91 ))
+            [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+            tag="${name}/v${version}"
+            error_file="$(mktemp)"
+            if ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" 2> "$error_file")"; then
+              test "$(jq -r '.object.type' <<< "$ref")" = tag
+              object="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/$(jq -r '.object.sha' <<< "$ref")")"
+              jq -e --arg tag "$tag" --arg sha "$GITHUB_SHA" '
+                .tag == $tag and .object.type == "commit" and .object.sha == $sha and .verification.verified == true
+              ' <<< "$object" >/dev/null
+              printf 'verified release tag already exists: %s\n' "$tag"
+            elif grep -Eiq 'HTTP 404|Not Found' "$error_file"; then
+              git tag -s "$tag" "$GITHUB_SHA" -m "$tag"
+              GIT_SSH_COMMAND="ssh -i ${deploy_key_file} -o IdentitiesOnly=yes -o UserKnownHostsFile=${known_hosts_file} -o StrictHostKeyChecking=yes" \
+                git push "git@github.com:${GITHUB_REPOSITORY}.git" "refs/tags/${tag}"
+              ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+              test "$(jq -r '.object.type' <<< "$ref")" = tag
+              object="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/$(jq -r '.object.sha' <<< "$ref")")"
+              jq -e --arg tag "$tag" --arg sha "$GITHUB_SHA" '
+                .tag == $tag and .object.type == "commit" and .object.sha == $sha and .verification.verified == true
+              ' <<< "$object" >/dev/null
+            else
+              cat "$error_file" >&2
+              exit 1
+            fi
+            rm -f "$error_file"
+          done < "$selected"
+      - name: Mark the release pull request tagged
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.release-merge.outputs.number }}
+        run: |
+          set -euo pipefail
+          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels/autorelease%3A%20pending" >/dev/null
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels" \
+            -f 'labels[]=autorelease: tagged' >/dev/null

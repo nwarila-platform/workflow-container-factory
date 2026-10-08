@@ -1,0 +1,353 @@
+# Purpose: publish immutable GitHub Release evidence for one verified container release tag.
+
+name: GitHub Release
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+  repository_dispatch:
+    types: [backfill-release]
+
+permissions:
+  contents: read
+
+jobs:
+  github-release:
+    name: github release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      attestations: read
+    env:
+      CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - name: Validate signed tag and release selection
+        id: release
+        env:
+          CALL_NAME: ${{ inputs.name }}
+          CALL_VERSION: ${{ inputs.version }}
+          DISPATCH_TAG: ${{ github.event.client_payload.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if test "$GITHUB_EVENT_NAME" = repository_dispatch; then
+            tag="$DISPATCH_TAG"
+            test "$GITHUB_REF" = refs/heads/main
+            test "$GITHUB_REF_NAME" = main
+          else
+            tag="${CALL_NAME}/v${CALL_VERSION}"
+          fi
+          if [[ ! "$tag" =~ ^([a-z0-9]+(-[a-z0-9]+)*)/v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]]; then
+            printf 'invalid release tag: %q\n' "$tag" >&2
+            exit 1
+          fi
+          name="${BASH_REMATCH[1]}"
+          version="${BASH_REMATCH[3]}"
+          (( ${#name} <= 91 ))
+          if test "$GITHUB_EVENT_NAME" != repository_dispatch; then
+            test "$CALL_NAME" = "$name"
+            test "$CALL_VERSION" = "$version"
+            test "$GITHUB_REF" = "refs/tags/${tag}"
+            test "$GITHUB_REF_NAME" = "$tag"
+          fi
+          ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+          test "$(jq -r '.ref' <<< "$ref_json")" = "refs/tags/${tag}"
+          test "$(jq -r '.object.type' <<< "$ref_json")" = tag
+          tag_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/$(jq -r '.object.sha' <<< "$ref_json")")"
+          tag_commit="$(jq -r '.object.sha' <<< "$tag_json")"
+          jq -e --arg tag "$tag" '
+            .tag == $tag and .object.type == "commit" and
+            (.object.sha | test("^[0-9a-f]{40}$")) and .verification.verified == true
+          ' <<< "$tag_json" >/dev/null
+          if test "$GITHUB_EVENT_NAME" != repository_dispatch; then
+            test "$tag_commit" = "$GITHUB_SHA"
+          fi
+          comparison="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${tag_commit}...main")"
+          test "$(jq -r '.base_commit.sha' <<< "$comparison")" = "$tag_commit"
+          case "$(jq -r '.status' <<< "$comparison")" in
+            ahead|identical) ;;
+            *) printf 'release commit is not reachable from main: %s\n' "$tag_commit" >&2; exit 1 ;;
+          esac
+          {
+            printf 'name=%s\n' "$name"
+            printf 'version=%s\n' "$version"
+            printf 'tag=%s\n' "$tag"
+            printf 'tag-commit=%s\n' "$tag_commit"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+          token: ''
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v2.5.2
+      - name: Install pinned Crane
+        run: |
+          set -euo pipefail
+          bash tools/install-crane.sh
+          printf '%s\n' "${PWD}/dist/tools" >> "$GITHUB_PATH"
+      - name: Derive and verify release evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ steps.release.outputs.name }}
+          TAG: ${{ steps.release.outputs.tag }}
+          TAG_COMMIT: ${{ steps.release.outputs.tag-commit }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/github-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "$work"
+          install -d -m 0700 "$work/assets" "$work/docker" "$work/provenance"
+          printf 'RELEASE_WORK=%s\n' "$work" >> "$GITHUB_ENV"
+          printf 'DOCKER_CONFIG=%s\n' "$work/docker" >> "$GITHUB_ENV"
+          export DOCKER_CONFIG="$work/docker"
+          image="ghcr.io/nwarila-platform/workflow-${NAME}"
+          index_digest="$(DOCKER_CONFIG="$work/docker" crane digest "${image}:${VERSION}")"
+          [[ "$index_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          result="$(DOCKER_CONFIG="$work/docker" python3.12 tools/check-index.py \
+            "$image" "$index_digest" --sbom-dir "$work/assets" --name "$NAME" --version "$VERSION")"
+          printf '%s\n' "$result"
+          amd64_digest="$(awk '$1 == "child" && $2 == "ok:" && $3 == "linux/amd64" { print $4 }' <<< "$result")"
+          arm64_digest="$(awk '$1 == "child" && $2 == "ok:" && $3 == "linux/arm64" { print $4 }' <<< "$result")"
+          [[ "$amd64_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$arm64_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          identity="https://github.com/nwarila-platform/workflow-container-factory/.github/workflows/build.yaml@refs/tags/${TAG}"
+          for digest in "$index_digest" "$amd64_digest" "$arm64_digest"; do
+            DOCKER_CONFIG="$work/docker" cosign verify "${image}@${digest}" \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              --certificate-github-workflow-repository nwarila-platform/workflow-container-factory \
+              --certificate-github-workflow-sha "$TAG_COMMIT" \
+              --certificate-github-workflow-ref "refs/tags/${TAG}"
+          done
+          gh attestation verify "oci://${image}@${index_digest}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/build.yaml" \
+            --source-ref "refs/tags/${TAG}"
+          (
+            cd "$work/provenance"
+            gh attestation download "oci://${image}@${index_digest}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --predicate-type https://slsa.dev/provenance/v1
+          )
+          mapfile -t bundles < <(find "$work/provenance" -mindepth 1 -maxdepth 1 -type f -name 'sha256*.jsonl' -print)
+          test "${#bundles[@]}" -eq 1
+          test "$(find "$work/provenance" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 1
+          mv "${bundles[0]}" "$work/assets/${NAME}-${VERSION}-provenance.sigstore.json"
+          printf 'index %s\nlinux/amd64 %s\nlinux/arm64 %s\n' \
+            "$index_digest" "$amd64_digest" "$arm64_digest" \
+            > "$work/assets/${NAME}-${VERSION}-digests.txt"
+          test ! -e "$work/docker/config.json"
+          printf 'INDEX_DIGEST=%s\n' "$index_digest" >> "$GITHUB_ENV"
+      - name: Write release notes
+        env:
+          NAME: ${{ steps.release.outputs.name }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3.12 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          name = os.environ["NAME"]
+          version = os.environ["VERSION"]
+          changelog = Path("containers", name, "CHANGELOG.md")
+          section = ""
+          if changelog.is_file():
+              text = changelog.read_text(encoding="utf-8")
+              match = re.search(
+                  rf"(?ms)^## (?:\[{re.escape(version)}\](?=\(|[ \t]|$)|{re.escape(version)}(?=[ \t]|$)).*?(?=^## |\Z)",
+                  text,
+              )
+              if match is not None:
+                  section = match.group(0).strip()
+          if not section:
+              section = "This release was backfilled from the existing signed tag."
+          image = f"ghcr.io/nwarila-platform/workflow-{name}"
+          digest = os.environ["INDEX_DIGEST"]
+          tag = os.environ["TAG"]
+          notes = (
+              f"{section}\n\nImage: `{image}@{digest}`\n\n"
+              "```sh\n"
+              f"cosign verify '{image}@{digest}' --certificate-identity "
+              f"'https://github.com/nwarila-platform/workflow-container-factory/.github/workflows/build.yaml@refs/tags/{tag}' "
+              "--certificate-oidc-issuer https://token.actions.githubusercontent.com\n"
+              f"gh attestation verify 'oci://{image}@{digest}' --repo nwarila-platform/workflow-container-factory "
+              "--signer-workflow nwarila-platform/workflow-container-factory/.github/workflows/build.yaml "
+              f"--source-ref 'refs/tags/{tag}'\n"
+              "```\n"
+          )
+          Path(os.environ["RELEASE_WORK"], "notes.md").write_text(notes, encoding="utf-8")
+          PY
+      - name: Create, resume, or verify immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ steps.release.outputs.name }}
+          TAG: ${{ steps.release.outputs.tag }}
+          TAG_COMMIT: ${{ steps.release.outputs.tag-commit }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          assets="$RELEASE_WORK/assets"
+          expected="$RELEASE_WORK/expected-names"
+          printf '%s\n' \
+            "${NAME}-${VERSION}-digests.txt" \
+            "${NAME}-${VERSION}-linux-amd64.spdx.json" \
+            "${NAME}-${VERSION}-linux-arm64.spdx.json" \
+            "${NAME}-${VERSION}-provenance.sigstore.json" \
+            | sort > "$expected"
+          find_release_id() {
+            local pages matches count
+            pages="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --paginate --slurp)"
+            matches="$(jq -c --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)]' <<< "$pages")"
+            count="$(jq 'length' <<< "$matches")"
+            if test "$count" -gt 1; then
+              printf 'refusing duplicate releases for tag: %s\n' "$TAG" >&2
+              exit 1
+            fi
+            if test "$count" -eq 1; then
+              jq -er '.[0].id | select(type == "number" and . > 0)' <<< "$matches"
+            fi
+          }
+          read_release() {
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}"
+          }
+          upload_asset() {
+            local file="$1" name="$2" status
+            status="$(curl --silent --show-error --output "$RELEASE_WORK/upload-response" --write-out '%{http_code}' \
+              --request POST \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'Content-Type: application/octet-stream' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              --data-binary "@${file}" \
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${name}")"
+            if test "$status" != 201; then
+              cat "$RELEASE_WORK/upload-response" >&2
+              printf 'release asset upload returned HTTP %s, expected 201\n' "$status" >&2
+              exit 1
+            fi
+          }
+
+          release_id="$(find_release_id)"
+          if test -n "$release_id"; then
+            release="$(read_release)"
+            state="$(jq -r 'if .draft then "draft" else "published" end' <<< "$release")"
+          else
+            state=absent
+          fi
+
+          if test "$state" = absent; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+              --target "$TAG_COMMIT" --title "${NAME} ${VERSION}" --notes-file "$RELEASE_WORK/notes.md"
+            release_id=""
+            for attempt in 1 2 3 4 5; do
+              release_id="$(find_release_id)"
+              test -n "$release_id" && break
+              test "$attempt" -eq 5 || sleep 1
+            done
+            test -n "$release_id"
+            release="$(read_release)"
+            state=draft
+          fi
+
+          verify_bundle() {
+            gh attestation verify "oci://ghcr.io/nwarila-platform/workflow-${NAME}@${INDEX_DIGEST}" \
+              --bundle "$1" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/build.yaml" \
+              --source-ref "refs/tags/${TAG}" >/dev/null
+          }
+          compare_asset() {
+            local current="$1" expected_file="$2"
+            if [[ "$current" == *-provenance.sigstore.json ]]; then
+              verify_bundle "$current"
+            else
+              cmp -s "$current" "$expected_file"
+            fi
+          }
+          require_release_identity() {
+            local data="$1"
+            jq -e --arg tag "$TAG" --arg target "$TAG_COMMIT" '
+              .tag_name == $tag and .target_commitish == $target
+            ' <<< "$data" >/dev/null
+          }
+          require_release_metadata() {
+            local data="$1"
+            jq -e --arg title "${NAME} ${VERSION}" \
+              --arg image "ghcr.io/nwarila-platform/workflow-${NAME}@${INDEX_DIGEST}" '
+              .name == $title and ((.body // "") | contains($image))
+            ' <<< "$data" >/dev/null
+          }
+          require_exact_assets() {
+            local data="$1"
+            jq -r '.assets[].name' <<< "$data" | sort > "$RELEASE_WORK/observed-names"
+            cmp -s "$expected" "$RELEASE_WORK/observed-names"
+          }
+
+          require_release_identity "$release"
+          if test "$state" = draft; then
+            jq -n --arg name "${NAME} ${VERSION}" --rawfile body "$RELEASE_WORK/notes.md" \
+              '{name: $name, body: $body}' > "$RELEASE_WORK/update-release.json"
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              --input "$RELEASE_WORK/update-release.json" >/dev/null
+            release="$(read_release)"
+            require_release_identity "$release"
+            require_release_metadata "$release"
+            mkdir "$RELEASE_WORK/existing"
+            while read -r asset; do
+              expected_file="$assets/$asset"
+              if jq -e --arg name "$asset" 'any(.assets[]; .name == $name)' <<< "$release" >/dev/null; then
+                current="$RELEASE_WORK/existing/$asset"
+                asset_id="$(jq -er --arg name "$asset" '.assets[] | select(.name == $name) | .id' <<< "$release")"
+                gh api -H 'Accept: application/octet-stream' \
+                  "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "$current"
+                if ! compare_asset "$current" "$expected_file"; then
+                  printf 'draft asset mismatch; replacing: %s\n' "$asset"
+                  gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" >/dev/null
+                  upload_asset "$expected_file" "$asset"
+                fi
+              else
+                upload_asset "$expected_file" "$asset"
+              fi
+            done < "$expected"
+            release="$(read_release)"
+            require_release_identity "$release"
+            require_exact_assets "$release"
+            printf '{"draft":false}\n' > "$RELEASE_WORK/publish-release.json"
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              --input "$RELEASE_WORK/publish-release.json" >/dev/null
+          else
+            jq -e '.draft == false and .immutable == true' <<< "$release" >/dev/null
+            require_release_metadata "$release"
+            require_exact_assets "$release"
+            mkdir "$RELEASE_WORK/published"
+            while read -r asset; do
+              current="$RELEASE_WORK/published/$asset"
+              asset_id="$(jq -er --arg name "$asset" '.assets[] | select(.name == $name) | .id' <<< "$release")"
+              gh api -H 'Accept: application/octet-stream' \
+                "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "$current"
+              compare_asset "$current" "$assets/$asset"
+            done < "$expected"
+          fi
+
+          release="$(read_release)"
+          require_release_identity "$release"
+          jq -e '.draft == false and .immutable == true' <<< "$release" >/dev/null
+          require_release_metadata "$release"
+          require_exact_assets "$release"

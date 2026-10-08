@@ -29,10 +29,27 @@ job reports the combined result.
 The runner acceptance workflow calls the organization runner at a pinned commit with released
 images: one must pass and four must be refused.
 
-A release starts with a signed annotated tag named `<name>/v<X.Y.Z>`. The release workflow checks
-the tag and the container's `VERSION`. It then builds a candidate image and pushes it by digest
-only, with no tag. It tests both architectures, signs and attests the candidate, verifies its
-evidence, and promotes it to the version and `sha-<commit>` tags. There is no `latest` tag.
+A `feat` or `fix` commit, or a breaking change, that changes `containers/<name>/` makes release-please
+open or update that container's release pull request. Types that release-please leaves out of the
+changelog, such as `docs` or `chore`, do not. Merging the pull request creates a signed annotated tag
+named `<name>/v<X.Y.Z>`. The tagging job runs in the `release` environment, which is restricted to `main`,
+and pushes over SSH with the repository's release deploy key. That push starts the release workflow.
+The tag rules allow only repository admins and that deploy key to create a release tag, so an admin
+can still push a signed tag by hand as a fallback.
+
+The release workflow checks the tag, its reachability from `main`, and the container's `VERSION`.
+It then builds a candidate image and pushes it by digest only, with no tag. It tests both
+architectures, signs and attests the candidate, verifies its evidence, and promotes it to the
+version and `sha-<commit>` tags. There is no `latest` tag. Finally, it publishes an immutable GitHub
+Release containing the index and child digests, both child-bound SPDX SBOM statements, and the
+GitHub provenance bundle.
+
+To backfill a GitHub Release for an existing signed tag, dispatch the reviewed workflow on `main`:
+
+```sh
+gh api -X POST repos/nwarila-platform/workflow-container-factory/dispatches \
+  -f event_type=backfill-release -f 'client_payload[tag]=<tag>'
+```
 
 ## Verify template-drift 3.0.2
 

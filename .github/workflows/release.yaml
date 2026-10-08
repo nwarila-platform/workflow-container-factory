@@ -1,4 +1,4 @@
-# Purpose: accept one signed container release tag and call the isolated reusable builder.
+# Purpose: accept one signed container release tag, call the isolated reusable builder, then publish its GitHub Release.
 
 name: Release
 
@@ -46,6 +46,13 @@ jobs:
           test "$(jq -r '.object.type' <<<"${tag_json}")" = commit
           test "$(jq -r '.object.sha' <<<"${tag_json}")" = "${GITHUB_SHA}"
           test "$(jq -r '.verification.verified' <<<"${tag_json}")" = true
+          tag_commit="$(jq -r '.object.sha' <<<"${tag_json}")"
+          comparison="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${tag_commit}...main")"
+          test "$(jq -r '.base_commit.sha' <<<"${comparison}")" = "${tag_commit}"
+          case "$(jq -r '.status' <<<"${comparison}")" in
+            ahead|identical) ;;
+            *) printf 'release commit is not reachable from main: %s\n' "${tag_commit}" >&2; exit 1 ;;
+          esac
           printf 'signed annotated release tag verified: refs/tags/%s -> %s\n' "${tag_name}" "${GITHUB_SHA}"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -95,3 +102,14 @@ jobs:
       id-token: write
       attestations: write
       artifact-metadata: write
+
+  github-release:
+    name: github release
+    needs: [tag, build]
+    uses: ./.github/workflows/github-release.yaml
+    with:
+      name: ${{ needs.tag.outputs.name }}
+      version: ${{ needs.tag.outputs.version }}
+    permissions:
+      contents: write
+      attestations: read

@@ -1,0 +1,4 @@
+{
+  "containers/template-drift": "3.0.2",
+  "containers/runner-selftest": "1.0.0"
+}
