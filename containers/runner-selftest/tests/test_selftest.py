@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from runner_selftest import checks
 
@@ -72,13 +73,49 @@ class SelftestTest(unittest.TestCase):
             f"tmpfs {self.root} tmpfs rw,nosuid,nodev 0 0\n"
             f"tmpfs {self.root} tmpfs rw,nosuid,nodev,noexec 0 0\n",
         )
-        self.assertTrue(checks.scratch(self.root, mounts).passed)
+        self.assertTrue(checks.scratch(directory=self.root, mounts=mounts).passed)
         self.assertFalse((self.root / ".runner-selftest-probe").exists())
         mounts.write_text(
             f"tmpfs {self.root} tmpfs rw,nosuid,nodev,noexec 0 0\n"
             f"tmpfs {self.root} tmpfs rw,nosuid,nodev 0 0\n"
         )
-        self.assertEqual(checks.scratch(self.root, mounts).detail, "missing mount options: noexec")
+        self.assertEqual(
+            checks.scratch(directory=self.root, mounts=mounts).detail,
+            f"{self.root} is missing mount options: noexec",
+        )
+
+    def test_home_scratch_writes_reads_removes_and_checks_mount_options(self):
+        mounts = self.write("mounts", f"tmpfs {self.root} tmpfs rw,nosuid,nodev,noexec 0 0\n")
+        result = checks.scratch("home scratch", self.root, mounts)
+        self.assertTrue(result.passed)
+        self.assertEqual(result.name, "home scratch")
+        self.assertFalse((self.root / ".runner-selftest-probe").exists())
+
+    def test_home_scratch_requires_a_writable_directory(self):
+        mounts = self.write("mounts", f"tmpfs {self.root} tmpfs rw,nosuid,nodev,noexec 0 0\n")
+        with mock.patch.object(Path, "write_bytes", side_effect=PermissionError(errno.EACCES, "denied")):
+            result = checks.scratch("home scratch", self.root, mounts)
+        self.assertEqual(
+            result.detail,
+            f"{self.root} probe failed: PermissionError: [Errno {errno.EACCES}] denied",
+        )
+
+    def test_home_scratch_requires_a_mount_entry(self):
+        mounts = self.write("mounts", "tmpfs /somewhere-else tmpfs rw,nosuid,nodev,noexec 0 0\n")
+        self.assertEqual(
+            checks.scratch("home scratch", self.root, mounts).detail,
+            f"{self.root} has no mount entry",
+        )
+
+    def test_home_scratch_requires_each_mount_option(self):
+        for option in ("nosuid", "nodev", "noexec"):
+            with self.subTest(option=option):
+                options = {"rw", "nosuid", "nodev", "noexec"} - {option}
+                mounts = self.write("mounts", f"tmpfs {self.root} tmpfs {','.join(sorted(options))} 0 0\n")
+                self.assertEqual(
+                    checks.scratch("home scratch", self.root, mounts).detail,
+                    f"{self.root} is missing mount options: {option}",
+                )
 
     def test_wrong_arguments_are_usage_errors_without_a_report(self):
         done = subprocess.run(

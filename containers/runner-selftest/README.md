@@ -11,8 +11,9 @@ It prints one line per check, in this order:
 - `workspace readable` and `workspace read-only`: the workspace has an entry and cannot be written.
 - `template readable` and `template read-only`: the same, once for each template.
 - `scratch`: a file can be written in `/tmp`, which is mounted `nosuid`, `nodev` and `noexec`.
+- `home scratch`: a file can be written in `/home/nonroot`, which is mounted `nosuid`, `nodev` and `noexec`.
 
-It does not look for other writable mounts, such as `/home/nonroot` or `/dev/shm`.
+It does not look for other writable mounts, such as `/dev/shm`.
 
 Example output with one template:
 
@@ -27,7 +28,8 @@ ok: workspace read-only
 ok: template readable: example/template
 ok: template read-only: example/template
 ok: scratch
-runner-selftest: PASS (10 checks)
+ok: home scratch
+runner-selftest: PASS (11 checks)
 ```
 
 ## Run the image
