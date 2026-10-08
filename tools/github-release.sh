@@ -300,8 +300,8 @@ fi
 
 require_release_identity "$release"
 if test "$state" = draft; then
-  jq -n --arg name "${name} ${version}" --rawfile body "$release_work/notes.md" \
-    '{name: $name, body: $body}' > "$release_work/update-release.json"
+  jq -n --arg tag "$tag" --arg name "${name} ${version}" --rawfile body "$release_work/notes.md" \
+    '{tag_name: $tag, name: $name, body: $body}' > "$release_work/update-release.json"
   gh api --method PATCH "repos/${repository}/releases/${release_id}" \
     --input "$release_work/update-release.json" >/dev/null
   release=$(read_release)
@@ -337,7 +337,7 @@ if test "$state" = draft; then
   release=$(read_release)
   require_release_identity "$release"
   require_exact_assets "$release"
-  printf '{"draft":false}\n' > "$release_work/publish-release.json"
+  jq -n --arg tag "$tag" '{tag_name: $tag, draft: false}' > "$release_work/publish-release.json"
   gh api --method PATCH "repos/${repository}/releases/${release_id}" \
     --input "$release_work/publish-release.json" >/dev/null
 else
