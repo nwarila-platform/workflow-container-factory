@@ -30,6 +30,7 @@
 !/containers/runner-selftest/.dockerignore
 !/containers/runner-selftest/VERSION
 !/containers/runner-selftest/README.md
+!/containers/runner-selftest/CHANGELOG.md
 !/containers/runner-selftest/example/template/README.txt
 !/containers/runner-selftest/example/workspace/README.txt
 !/containers/runner-selftest/runner_selftest/__init__.py
@@ -48,6 +49,7 @@
 !/containers/template-drift/.dockerignore
 !/containers/template-drift/VERSION
 !/containers/template-drift/README.md
+!/containers/template-drift/CHANGELOG.md
 !/containers/template-drift/example/expected-report.txt
 !/containers/template-drift/example/repository/CHANGELOG.md
 !/containers/template-drift/example/repository/legacy.cfg
@@ -67,6 +69,8 @@
 !/.github/workflows/ci.yaml
 !/.github/workflows/release.yaml
 !/.github/workflows/build.yaml
+!/.github/workflows/github-release.yaml
+!/.github/workflows/release-please.yaml
 !/.github/workflows/runner-acceptance.yaml
 !/.github/renovate.json5
 !/.github/CODEOWNERS
@@ -74,6 +78,8 @@
 # Shared release tooling.
 !/tools/install-crane.sh
 !/tools/check-labels.sh
+!/tools/check-index.py
+!/tools/test_check_index.py
 
 # Documents and repository settings.
 !/README.md
@@ -82,3 +88,5 @@
 !/.editorconfig
 !/.gitattributes
 !/.gitignore
+!/.release-please-manifest.json
+!/release-please-config.json

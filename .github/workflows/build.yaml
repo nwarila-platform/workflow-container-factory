@@ -117,96 +117,21 @@ jobs:
           NAME: ${{ inputs.name }}
         run: |
           set -euo pipefail
-          python3.12 - <<'PY'
-          import json
-          import os
-          import re
-          import subprocess
-          from pathlib import Path
-
-          digest_re = re.compile(r"sha256:[0-9a-f]{64}")
-          image = f"ghcr.io/nwarila-platform/workflow-{os.environ['NAME']}"
-          metadata = json.loads(Path("dist/build/image-metadata.json").read_text(encoding="utf-8"))
-          index_digest = metadata.get("containerimage.digest")
-          if not isinstance(index_digest, str) or digest_re.fullmatch(index_digest) is None:
-              raise SystemExit(f"candidate metadata digest is invalid: {index_digest!r}")
-          observed = subprocess.check_output(["crane", "digest", f"{image}@{index_digest}"], text=True).strip()
-          if observed != index_digest:
-              raise SystemExit(f"candidate digest readback mismatch: {observed!r}")
-          index = json.loads(subprocess.check_output(["crane", "manifest", f"{image}@{index_digest}"], text=True))
-          if index.get("mediaType") not in {
-              "application/vnd.oci.image.index.v1+json",
-              "application/vnd.docker.distribution.manifest.list.v2+json",
-          }:
-              raise SystemExit(f"candidate is not an OCI/Docker image index: {index.get('mediaType')!r}")
-          manifests = index.get("manifests")
-          if not isinstance(manifests, list) or len(manifests) != 4:
-              raise SystemExit(f"index must contain two runnable and two attestation manifests: {manifests!r}")
-          runnable = {}
-          attestations = {}
-          for descriptor in manifests:
-              digest = descriptor.get("digest")
-              if not isinstance(digest, str) or digest_re.fullmatch(digest) is None:
-                  raise SystemExit(f"invalid descriptor digest: {digest!r}")
-              platform = descriptor.get("platform") or {}
-              annotations = descriptor.get("annotations") or {}
-              if annotations.get("vnd.docker.reference.type") == "attestation-manifest":
-                  subject = annotations.get("vnd.docker.reference.digest")
-                  if subject in attestations:
-                      raise SystemExit(f"duplicate attestation manifest for {subject}")
-                  attestations[subject] = digest
-                  continue
-              key = (platform.get("os"), platform.get("architecture"))
-              if key not in {("linux", "amd64"), ("linux", "arm64")} or key in runnable:
-                  raise SystemExit(f"unexpected runnable descriptor platform: {platform!r}")
-              runnable[key] = digest
-          if set(runnable) != {("linux", "amd64"), ("linux", "arm64")}:
-              raise SystemExit(f"runnable platform set mismatch: {sorted(runnable)!r}")
-          if set(attestations) != set(runnable.values()):
-              raise SystemExit("each runnable child must have exactly one attestation manifest")
-          for arch in ("amd64", "arm64"):
-              child = runnable[("linux", arch)]
-              attestation = json.loads(subprocess.check_output(
-                  ["crane", "manifest", f"{image}@{attestations[child]}"], text=True
-              ))
-              layers = attestation.get("layers")
-              if not isinstance(layers, list) or len(layers) != 1:
-                  raise SystemExit(f"{arch} attestation manifest must contain exactly one layer: {layers!r}")
-              layer = layers[0]
-              if layer.get("mediaType") != "application/vnd.in-toto+json":
-                  raise SystemExit(f"{arch} attestation layer media type mismatch")
-              if (layer.get("annotations") or {}).get("in-toto.io/predicate-type") != "https://spdx.dev/Document":
-                  raise SystemExit(f"{arch} attestation layer is not the SPDX predicate")
-              layer_digest = layer.get("digest")
-              if not isinstance(layer_digest, str) or digest_re.fullmatch(layer_digest) is None:
-                  raise SystemExit(f"invalid {arch} attestation layer digest: {layer_digest!r}")
-              statement = json.loads(subprocess.check_output(["crane", "blob", f"{image}@{layer_digest}"]))
-              if statement.get("_type") not in {
-                  "https://in-toto.io/Statement/v0.1",
-                  "https://in-toto.io/Statement/v1",
-              }:
-                  raise SystemExit(f"{arch} SBOM is not an in-toto statement")
-              if statement.get("predicateType") != "https://spdx.dev/Document":
-                  raise SystemExit(f"{arch} SBOM predicate type mismatch")
-              subjects = statement.get("subject")
-              expected_hex = child.removeprefix("sha256:")
-              if not isinstance(subjects, list) or len(subjects) != 1 or (subjects[0].get("digest") or {}).get("sha256") != expected_hex:
-                  raise SystemExit(f"{arch} SBOM subject does not bind the runnable child")
-              predicate = statement.get("predicate")
-              if not isinstance(predicate, dict) or predicate.get("spdxVersion") != "SPDX-2.3":
-                  raise SystemExit(f"{arch} predicate is not SPDX 2.3 JSON")
-              if predicate.get("SPDXID") != "SPDXRef-DOCUMENT":
-                  raise SystemExit(f"{arch} SPDX document identifier mismatch")
-              packages = predicate.get("packages")
-              if not isinstance(packages, list) or not packages:
-                  raise SystemExit(f"{arch} SPDX package inventory is empty")
-              print(f"{arch} candidate child and single SPDX SBOM passed: child={child} packages={len(packages)}")
-          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
-              output.write(f"index-digest={index_digest}\n")
-              output.write(f"amd64-digest={runnable[('linux', 'amd64')]}\n")
-              output.write(f"arm64-digest={runnable[('linux', 'arm64')]}\n")
-          print(f"candidate index: {image}@{index_digest}")
-          PY
+          image="ghcr.io/nwarila-platform/workflow-${NAME}"
+          index_digest="$(jq -er '."containerimage.digest"' dist/build/image-metadata.json)"
+          [[ "$index_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          result="$(python3.12 tools/check-index.py "$image" "$index_digest")"
+          printf '%s\n' "$result"
+          amd64_digest="$(awk '$1 == "child" && $2 == "ok:" && $3 == "linux/amd64" { print $4 }' <<<"$result")"
+          arm64_digest="$(awk '$1 == "child" && $2 == "ok:" && $3 == "linux/arm64" { print $4 }' <<<"$result")"
+          [[ "$amd64_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$arm64_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$(grep -c '^child ok:' <<<"$result")" -eq 2
+          {
+            printf 'index-digest=%s\n' "$index_digest"
+            printf 'amd64-digest=%s\n' "$amd64_digest"
+            printf 'arm64-digest=%s\n' "$arm64_digest"
+          } >> "$GITHUB_OUTPUT"
       - name: Validate requirement labels
         env:
           AMD64_DIGEST: ${{ steps.candidate.outputs.amd64-digest }}
@@ -419,91 +344,10 @@ jobs:
         run: |
           set -euo pipefail
           test ! -e "$DOCKER_CONFIG/config.json"
-          python3.12 - <<'PY'
-          import json
-          import os
-          import re
-          import subprocess
-
-          digest_re = re.compile(r"sha256:[0-9a-f]{64}")
-          image = f"ghcr.io/nwarila-platform/workflow-{os.environ['NAME']}"
-          index_digest = os.environ["INDEX_DIGEST"]
-          if digest_re.fullmatch(index_digest) is None:
-              raise SystemExit(f"candidate digest is invalid: {index_digest!r}")
-          observed = subprocess.check_output(["crane", "digest", f"{image}@{index_digest}"], text=True).strip()
-          if observed != index_digest:
-              raise SystemExit(f"candidate digest readback mismatch: {observed!r}")
-          index = json.loads(subprocess.check_output(["crane", "manifest", f"{image}@{index_digest}"], text=True))
-          if index.get("mediaType") not in {
-              "application/vnd.oci.image.index.v1+json",
-              "application/vnd.docker.distribution.manifest.list.v2+json",
-          }:
-              raise SystemExit(f"candidate is not an OCI/Docker image index: {index.get('mediaType')!r}")
-          manifests = index.get("manifests")
-          if not isinstance(manifests, list) or len(manifests) != 4:
-              raise SystemExit(f"index must contain two runnable and two attestation manifests: {manifests!r}")
-          runnable = {}
-          attestations = {}
-          for descriptor in manifests:
-              digest = descriptor.get("digest")
-              if not isinstance(digest, str) or digest_re.fullmatch(digest) is None:
-                  raise SystemExit(f"invalid descriptor digest: {digest!r}")
-              platform = descriptor.get("platform") or {}
-              annotations = descriptor.get("annotations") or {}
-              if annotations.get("vnd.docker.reference.type") == "attestation-manifest":
-                  subject = annotations.get("vnd.docker.reference.digest")
-                  if subject in attestations:
-                      raise SystemExit(f"duplicate attestation manifest for {subject}")
-                  attestations[subject] = digest
-                  continue
-              key = (platform.get("os"), platform.get("architecture"))
-              if key not in {("linux", "amd64"), ("linux", "arm64")} or key in runnable:
-                  raise SystemExit(f"unexpected runnable descriptor platform: {platform!r}")
-              runnable[key] = digest
-          if set(runnable) != {("linux", "amd64"), ("linux", "arm64")}:
-              raise SystemExit(f"runnable platform set mismatch: {sorted(runnable)!r}")
-          if set(attestations) != set(runnable.values()):
-              raise SystemExit("each runnable child must have exactly one attestation manifest")
-          for arch in ("amd64", "arm64"):
-              child = runnable[("linux", arch)]
-              attestation = json.loads(subprocess.check_output(
-                  ["crane", "manifest", f"{image}@{attestations[child]}"], text=True
-              ))
-              layers = attestation.get("layers")
-              if not isinstance(layers, list) or len(layers) != 1:
-                  raise SystemExit(f"{arch} attestation manifest must contain exactly one layer: {layers!r}")
-              layer = layers[0]
-              if layer.get("mediaType") != "application/vnd.in-toto+json":
-                  raise SystemExit(f"{arch} attestation layer media type mismatch")
-              if (layer.get("annotations") or {}).get("in-toto.io/predicate-type") != "https://spdx.dev/Document":
-                  raise SystemExit(f"{arch} attestation layer is not the SPDX predicate")
-              layer_digest = layer.get("digest")
-              if not isinstance(layer_digest, str) or digest_re.fullmatch(layer_digest) is None:
-                  raise SystemExit(f"invalid {arch} attestation layer digest: {layer_digest!r}")
-              statement = json.loads(subprocess.check_output(["crane", "blob", f"{image}@{layer_digest}"]))
-              if statement.get("_type") not in {
-                  "https://in-toto.io/Statement/v0.1",
-                  "https://in-toto.io/Statement/v1",
-              }:
-                  raise SystemExit(f"{arch} SBOM is not an in-toto statement")
-              if statement.get("predicateType") != "https://spdx.dev/Document":
-                  raise SystemExit(f"{arch} SBOM predicate type mismatch")
-              subjects = statement.get("subject")
-              expected_hex = child.removeprefix("sha256:")
-              if not isinstance(subjects, list) or len(subjects) != 1 or (subjects[0].get("digest") or {}).get("sha256") != expected_hex:
-                  raise SystemExit(f"{arch} SBOM subject does not bind the runnable child")
-              predicate = statement.get("predicate")
-              if not isinstance(predicate, dict) or predicate.get("spdxVersion") != "SPDX-2.3":
-                  raise SystemExit(f"{arch} predicate is not SPDX 2.3 JSON")
-              if predicate.get("SPDXID") != "SPDXRef-DOCUMENT":
-                  raise SystemExit(f"{arch} SPDX document identifier mismatch")
-              packages = predicate.get("packages")
-              if not isinstance(packages, list) or not packages:
-                  raise SystemExit(f"{arch} SPDX package inventory is empty")
-              print(f"anonymous {arch} SPDX verification passed: child={child} packages={len(packages)}")
-          PY
+          python3.12 tools/check-index.py \
+            "ghcr.io/nwarila-platform/workflow-${NAME}" \
+            "$INDEX_DIGEST"
           test ! -e "$DOCKER_CONFIG/config.json"
-
   promote:
     name: promote
     needs: [build, verify]

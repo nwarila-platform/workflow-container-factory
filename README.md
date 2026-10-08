@@ -29,10 +29,17 @@ job reports the combined result.
 The runner acceptance workflow calls the organization runner at a pinned commit with released
 images: one must pass and four must be refused.
 
-A release starts with a signed annotated tag named `<name>/v<X.Y.Z>`. The release workflow checks
-the tag and the container's `VERSION`. It then builds a candidate image and pushes it by digest
-only, with no tag. It tests both architectures, signs and attests the candidate, verifies its
-evidence, and promotes it to the version and `sha-<commit>` tags. There is no `latest` tag.
+A conventional commit that changes `containers/<name>/` makes release-please open or update that
+container's release pull request. Merging the pull request creates a signed annotated tag named
+`<name>/v<X.Y.Z>` and starts the release workflow. A signed tag can also be pushed by hand as a
+fallback.
+
+The release workflow checks the tag, its reachability from `main`, and the container's `VERSION`.
+It then builds a candidate image and pushes it by digest only, with no tag. It tests both
+architectures, signs and attests the candidate, verifies its evidence, and promotes it to the
+version and `sha-<commit>` tags. There is no `latest` tag. Finally, it publishes an immutable GitHub
+Release containing the index and child digests, both child-bound SPDX SBOM statements, and the
+GitHub provenance bundle.
 
 ## Verify template-drift 3.0.2
 
