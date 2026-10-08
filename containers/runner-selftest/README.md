@@ -34,8 +34,8 @@ runner-selftest: PASS (11 checks)
 
 ## Run the image
 
-Mount a nonempty workspace and at least one nonempty template. The image runs as user `65532`, so
-that user must be able to read every mounted file and directory. From this directory:
+Mount a nonempty workspace and at least one nonempty template. The image runs as user `65532`, so that
+user must be able to read and traverse each mounted directory. From this directory:
 
 Set `version` to the release you want from the factory's
 [Releases page](https://github.com/nwarila-platform/workflow-container-factory/releases), then verify

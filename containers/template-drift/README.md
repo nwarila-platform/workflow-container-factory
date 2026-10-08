@@ -10,9 +10,10 @@ require it to exist, or require it to be absent. Warnings are reported without f
 
 ## Run the image
 
-Mount the repository and each template read-only. The image runs as user `65532`, so that user must
-be able to read every mounted file and directory. The image test copies the example and runs
-`chmod -R a+rX` on the copy for this reason. Do the same if your checkout is not world-readable.
+Mount the repository and each template read-only. The image runs as user `65532`, so that user must be
+able to traverse the mounts, read each template manifest, and read the files used by byte or leading-line
+comparisons. The image test copies the example and runs `chmod -R a+rX` on the copy for this reason. Do
+the same if the files the check needs are not readable by user `65532`.
 This example uses the same arguments and runtime restrictions as the image test:
 
 Verify the image first with the factory's [release verification steps](../../README.md#verify-a-release-yourself).

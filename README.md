@@ -7,9 +7,9 @@ versioned checks one CI gate, one release process, and verifiable supply-chain e
 
 ## What a workflow container is
 
-A workflow container is a small image that a CI workflow runs as one check. The organization's
-shared runner gives it no network access, a read-only root file system, no Linux capabilities, and
-user and group ID `65532`.
+A workflow container is a small image that a CI workflow runs as one check. The organization's shared
+runner gives it no network access, a read-only root file system, and no Linux capabilities. Factory
+images run as user and group ID `65532`.
 
 ## What every release carries
 
@@ -35,8 +35,9 @@ the GitHub provenance bundle.
 A release-tag push runs the workflow files from the tagged commit. For that reason, repository rules
 allow only repository administrators and one write deploy key to create or update
 `<name>/v<version>` tags. The private half of that key is stored as a secret in the `release`
-environment, and only `main` may use that environment. For non-administrators, repository rules
-require signed tags and prevent deleting or force-moving them. Published GitHub Releases are immutable.
+environment, and only `main` may use that environment. For non-administrators, repository rules require
+the tagged commit to be signed and prevent deleting or force-moving tags. The release workflow separately
+requires a signed annotated tag object. Published GitHub Releases are immutable.
 
 The organization's [shared runner](https://github.com/nwarila-platform/.github/blob/main/.github/workflows/run-container.yaml)
 verifies the image by digest and requires the exact certificate identity above. It then requires all
@@ -135,7 +136,8 @@ available versions.
 
 - `containers/` contains each container's source, `Containerfile`, version, tests, and example.
 - `tools/check-labels.sh` validates the five requirement labels.
-- `tools/check-index.py` validates the multi-architecture index and its child-bound SPDX SBOMs.
+- `tools/check-index.py` validates the multi-architecture image and confirms that each architecture has
+  its own SPDX SBOM.
 - `tools/test_check_index.py` tests the index validator without a registry.
 - `tools/install-crane.sh` installs the reviewed Crane version used by the workflows.
 - `tools/github-release.sh` verifies and publishes an immutable GitHub Release.
@@ -145,9 +147,9 @@ available versions.
 
 ## Continuous integration
 
-`ci.yaml` runs for pull requests and pushes to `main`. It runs each container's host tests, then builds,
-checks, and tests the image on both release architectures. Its `CI result` job combines those results
-into one stable required check.
+`ci.yaml` runs for pull requests and pushes to `main`. For every container, it runs host tests and,
+independently, builds, checks, and tests the image on both release architectures. Its `CI result` job
+waits for and combines those results into one stable required check.
 
 `release-please.yaml` maintains per-container release pull requests and creates signed release tags
 after they merge. `release.yaml` checks a pushed release tag and calls `build.yaml`. That reusable
