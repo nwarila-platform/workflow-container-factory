@@ -22,6 +22,8 @@ oid_a=1111111111111111111111111111111111111111
 oid_b=2222222222222222222222222222222222222222
 digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 real_chmod=$(command -v chmod)
+real_git=$(command -v git)
+real_rm=$(command -v rm)
 
 cat >"$fake_bin/git" <<'EOF'
 #!/usr/bin/env bash
@@ -40,6 +42,9 @@ if [[ "${1:-}" == config && "${2:-}" == --get && "${3:-}" == remote.origin.url ]
 fi
 if [[ "${1:-}" == init ]]; then
   [[ "${HOOK_GIT_INIT_FAIL:-0}" != 1 ]] || exit 128
+  if [[ "${HOOK_USE_REAL_GIT_INIT:-0}" == 1 ]]; then
+    exec "$HOOK_REAL_GIT" "$@"
+  fi
   mkdir -p "${@: -1}"
   exit 0
 fi
@@ -47,6 +52,11 @@ if [[ "${1:-}" == -C ]]; then
   directory=$2
   shift 2
   if [[ " $* " == *" fetch "* ]]; then
+    if [[ "${HOOK_USE_REAL_GIT_INIT:-0}" == 1 ]] \
+      && "$HOOK_REAL_GIT" config --file "$directory/.git/config" \
+        --get-regexp '^url\..*\.insteadof$' >/dev/null; then
+      exit 128
+    fi
     printf '%s\n' "${@: -1}" >"$directory/.hook-head"
     [[ "${HOOK_FETCH_FAIL:-0}" != 1 ]]
     exit
@@ -71,6 +81,17 @@ cat >"$fake_bin/chmod" <<'EOF'
 set -euo pipefail
 [[ "${HOOK_CHMOD_FAIL:-0}" != 1 ]] || exit 1
 exec "$HOOK_REAL_CHMOD" "$@"
+EOF
+
+cat >"$fake_bin/rm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${HOOK_SIGNAL_DURING_CLEANUP:-0}" == 1 ]]; then
+  "$HOOK_REAL_RM" "$@"
+  kill -TERM "$PPID"
+  exit 0
+fi
+exec "$HOOK_REAL_RM" "$@"
 EOF
 
 cat >"$fake_bin/cosign" <<'EOF'
@@ -103,7 +124,7 @@ fi
 printf 'template-drift: FAKE CHECKER %s\n' "${HOOK_ENGINE_EXIT:-0}"
 exit "${HOOK_ENGINE_EXIT:-0}"
 EOF
-chmod +x "$fake_bin/git" "$fake_bin/cosign" "$fake_bin/engine" "$fake_bin/chmod"
+chmod +x "$fake_bin/git" "$fake_bin/cosign" "$fake_bin/engine" "$fake_bin/chmod" "$fake_bin/rm"
 cp "$fake_bin/engine" "$fake_bin/docker"
 cp "$fake_bin/engine" "$fake_bin/podman"
 rm "$fake_bin/engine"
@@ -123,7 +144,7 @@ run_hook() {
   set +e
   (cd "$consumer" && env PATH="$fake_bin:$PATH" TMPDIR="$case_tmp" \
     HOOK_TOP="$consumer" HOOK_ORIGIN=https://github.com/octo/consumer.git \
-    HOOK_LOG="$log" HOOK_DIGEST="$digest" HOOK_REAL_CHMOD="$real_chmod" \
+    HOOK_LOG="$log" HOOK_DIGEST="$digest" HOOK_REAL_CHMOD="$real_chmod" HOOK_REAL_RM="$real_rm" \
     "$@" "$hook") >"$log/output" 2>&1
   actual=$?
   set -e
@@ -217,7 +238,20 @@ run_hook "fetched HEAD mismatch" 2 HOOK_HEAD_MISMATCH=1
 reset_inputs
 run_hook "git init failure" 2 HOOK_GIT_INIT_FAIL=1
 reset_inputs
+git_template=$test_root/git-template
+global_git_config=$test_root/global.gitconfig
+mkdir -p "$git_template"
+cat >"$git_template/config" <<'EOF'
+[url "file:///missing/"]
+  insteadOf = https://github.com/
+EOF
+"$real_git" config --file "$global_git_config" init.templateDir "$git_template"
+run_hook "global init.templateDir URL rewrite isolation" 0 HOOK_USE_REAL_GIT_INIT=1 \
+  HOOK_REAL_GIT="$real_git" GIT_CONFIG_GLOBAL="$global_git_config"
+reset_inputs
 run_hook "chmod failure" 2 HOOK_CHMOD_FAIL=1
+reset_inputs
+run_hook "TERM during final cleanup" 2 HOOK_SIGNAL_DURING_CLEANUP=1
 
 for cosign_mode in empty invalid conflict; do
   reset_inputs
@@ -241,7 +275,7 @@ mkdir -p "$case_tmp" "$log"
 set +e
 (cd "$consumer" && exec env PATH="$fake_bin:$PATH" TMPDIR="$case_tmp" \
   HOOK_TOP="$consumer" HOOK_ORIGIN=https://github.com/octo/consumer.git \
-  HOOK_LOG="$log" HOOK_DIGEST="$digest" HOOK_REAL_CHMOD="$real_chmod" \
+  HOOK_LOG="$log" HOOK_DIGEST="$digest" HOOK_REAL_CHMOD="$real_chmod" HOOK_REAL_RM="$real_rm" \
   HOOK_BLOCK=1 "$hook") >"$log/output" 2>&1 &
 hook_pid=$!
 for _ in $(seq 1 50); do

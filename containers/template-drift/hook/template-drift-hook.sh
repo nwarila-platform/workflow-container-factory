@@ -11,7 +11,7 @@ temporary_directory=
 # shellcheck disable=SC2317 # Called through the traps below.
 cleanup() {
   local status=$?
-  trap - ERR EXIT HUP INT TERM
+  trap - ERR EXIT
   if [[ -n "$temporary_directory" ]]; then
     if ! rm -rf "$temporary_directory"; then
       printf 'template-drift hook: cannot remove temporary directory\n' >&2 || :
@@ -140,7 +140,8 @@ index=0
 # fetch stands in for the public check.
 while read -r identity oid; do
   template_directory="$temporary_directory/$index"
-  git init -q "$template_directory" || fail "cannot create $template_directory"
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    git init -q "$template_directory" || fail "cannot create $template_directory"
   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
     git -C "$template_directory" -c credential.helper= fetch --quiet --no-tags --depth=1 \
     "https://github.com/$identity.git" "$oid" || fail "cannot fetch $identity@$oid"

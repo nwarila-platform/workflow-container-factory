@@ -42,7 +42,7 @@ The factory provides a `template-drift` hook for the `pre-push` stage. It verifi
 keyless signature, fetches each locked public template anonymously, and runs the verified image by
 digest with the same read-only mounts and runtime restrictions used in CI.
 
-The hook requires `git`, `jq`, `python3`, `cosign`, and either a working Docker daemon or rootless
+The hook requires `git` 2.32 or later, `jq`, `python3`, `cosign`, and either a working Docker daemon or rootless
 Podman. If `TEMPLATE_DRIFT_ENGINE` is set, it must be `docker` or `podman` and that engine's `info` command must
 succeed; otherwise the hook stops with exit status 2. If the variable is unset or empty, the hook tries
 Docker first and then Podman and uses the first engine whose `info` command succeeds.
