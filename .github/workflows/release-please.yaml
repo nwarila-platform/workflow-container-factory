@@ -88,7 +88,19 @@ jobs:
             branch="$(jq -r '.head.ref' <<< "$pr")"
             sha="$(jq -r '.head.sha' <<< "$pr")"
             repo_id="$(jq -r '.head.repo.id' <<< "$pr")"
-            runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?branch=${branch}&event=pull_request&per_page=100" --paginate --slurp)"
+            for attempt in $(seq 1 12); do
+              runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?branch=${branch}&event=pull_request&per_page=100" --paginate --slurp)"
+              count="$(jq --arg sha "$sha" '[.[].workflow_runs[] | select(.head_sha == $sha)] | length' <<< "$runs")"
+              printf 'release PR run wait: pr=%s sha=%s attempt=%s runs=%s\n' "$number" "$sha" "$attempt" "$count"
+              if test "$count" -gt 0; then
+                break
+              fi
+              if test "$attempt" -eq 12; then
+                printf 'no pull_request run appeared for release PR %s at %s within 120 seconds\n' "$number" "$sha" >&2
+                exit 1
+              fi
+              sleep 10
+            done
             jq -c '.[].workflow_runs[]' <<< "$runs" > "$work/runs"
             while read -r run; do
               run_id="$(jq -r '
