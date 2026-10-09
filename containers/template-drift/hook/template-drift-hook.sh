@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-shopt -s inherit_errexit
+if ! shopt -s inherit_errexit 2>/dev/null; then
+  printf 'template-drift hook: bash 4.4 or later is required\n' >&2
+  exit 2
+fi
 
 fail() {
   printf 'template-drift hook: %s\n' "$1" >&2
@@ -10,7 +13,6 @@ fail() {
 temporary_directory=
 # shellcheck disable=SC2317 # Called through the traps below.
 cleanup() {
-  local status=$?
   trap - ERR EXIT
   if [[ -n "$temporary_directory" ]]; then
     if ! rm -rf "$temporary_directory"; then
@@ -18,7 +20,6 @@ cleanup() {
       exit 2
     fi
   fi
-  return "$status"
 }
 trap cleanup EXIT
 trap 'exit 2' HUP INT TERM
@@ -41,7 +42,14 @@ for command_name in git jq python3 cosign; do
 done
 
 engine=${TEMPLATE_DRIFT_ENGINE:-}
-if [[ -z "$engine" ]]; then
+if [[ -n "$engine" ]]; then
+  case "$engine" in
+    docker | podman) ;;
+    *) fail "unsupported engine: $engine" ;;
+  esac
+  command -v "$engine" >/dev/null || fail "missing $engine"
+  "$engine" info >/dev/null 2>&1 || fail "$engine is not working"
+else
   for candidate in docker podman; do
     if command -v "$candidate" >/dev/null && "$candidate" info >/dev/null 2>&1; then
       engine=$candidate
@@ -50,12 +58,6 @@ if [[ -z "$engine" ]]; then
   done
   [[ -n "$engine" ]] || fail "no working docker or podman"
 fi
-case "$engine" in
-  docker | podman) ;;
-  *) fail "unsupported engine: $engine" ;;
-esac
-command -v "$engine" >/dev/null || fail "missing $engine"
-"$engine" info >/dev/null 2>&1 || fail "$engine is not working"
 
 checkout=$(git rev-parse --show-toplevel 2>/dev/null) || fail "not in a Git work tree"
 working_directory=$(pwd -P) || fail "cannot locate the working directory"
@@ -128,9 +130,18 @@ except Exception:
     fail("cannot read pinned inputs")
 PY
 ) || fail "invalid template identity or lock"
-[[ -n "$pins" ]] || fail "no templates to check"
 
 temporary_directory=$(mktemp -d) || fail "cannot create a temporary directory"
+# Git exports repository variables to hooks in linked worktrees and submodules. Clear them before
+# operating on the template checkouts so those commands cannot alter the consumer repository.
+# Keep GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT: they carry the command-scoped `git -c` settings.
+repository_variables=$(git rev-parse --local-env-vars | grep -vx \
+  -e GIT_CONFIG_PARAMETERS -e GIT_CONFIG_COUNT) || fail "cannot list Git repository variables"
+# shellcheck disable=SC2086 # Git prints one variable name per line.
+unset $repository_variables
+unset GIT_ASKPASS GIT_TEMPLATE_DIR SSH_ASKPASS
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_NOSYSTEM=1
 export GIT_TERMINAL_PROMPT=0
 template_mounts=()
 checker_templates=()
@@ -140,12 +151,10 @@ index=0
 # fetch stands in for the public check.
 while read -r identity oid; do
   template_directory="$temporary_directory/$index"
-  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
-    git init -q "$template_directory" || fail "cannot create $template_directory"
-  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
-    git -C "$template_directory" -c credential.helper= fetch --quiet --no-tags --depth=1 \
+  git init -q "$template_directory" || fail "cannot create $template_directory"
+  git -C "$template_directory" -c credential.helper= fetch --quiet --no-tags --depth=1 \
     "https://github.com/$identity.git" "$oid" || fail "cannot fetch $identity@$oid"
-  git -C "$template_directory" -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD \
+  git -C "$template_directory" checkout --quiet --detach FETCH_HEAD \
     || fail "cannot check out $identity@$oid"
   template_head=$(git -C "$template_directory" rev-parse HEAD) \
     || fail "cannot read the checkout commit for $identity"
@@ -159,14 +168,12 @@ chmod -R a+rX "$temporary_directory" || fail "cannot make the template checkouts
 image=ghcr.io/nwarila-platform/workflow-template-drift
 certificate_identity="https://github.com/nwarila-platform/workflow-container-factory/.github/workflows/build.yaml@refs/tags/template-drift/v$version"
 cosign_error="$temporary_directory/cosign.stderr"
-if verification=$(cosign verify "$image:$version" \
+if ! verification=$(cosign verify "$image:$version" \
   --certificate-identity "$certificate_identity" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-github-workflow-repository nwarila-platform/workflow-container-factory \
   --certificate-github-workflow-ref "refs/tags/template-drift/v$version" \
   -o json 2>"$cosign_error"); then
-  :
-else
   printf 'template-drift hook: image signature not verified\n' >&2 || :
   cat "$cosign_error" >&2 || :
   exit 2
@@ -178,7 +185,7 @@ digest=$(jq -er '
   else
     error("no signatures")
   end
-' <<<"$verification" 2>/dev/null) || fail "unusable verification result"
+' <<<"$verification") || fail "unusable verification result"
 [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "invalid verified digest"
 
 engine_arguments=(run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges)

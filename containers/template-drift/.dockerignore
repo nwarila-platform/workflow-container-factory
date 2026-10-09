@@ -1,4 +1,7 @@
-# Only the Python package enters the build context.
+# Allow only the package modules copied into the image.
 *
 !workflow_template_drift/
-workflow_template_drift/__pycache__/
+workflow_template_drift/*
+!workflow_template_drift/__init__.py
+!workflow_template_drift/__main__.py
+!workflow_template_drift/checker.py

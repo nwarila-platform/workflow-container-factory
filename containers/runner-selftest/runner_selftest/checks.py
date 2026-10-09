@@ -2,9 +2,10 @@
 
 import errno
 import os
+import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -19,7 +20,9 @@ class Result:
 
 def user(getuid: Callable[[], int] = os.getuid, getgid: Callable[[], int] = os.getgid) -> Result:
     uid, gid = getuid(), getgid()
-    detail = None if (uid, gid) == (65532, 65532) else f"expected uid/gid 65532/65532, got {uid}/{gid}"
+    detail = (
+        None if (uid, gid) == (65532, 65532) else f"expected uid/gid 65532/65532, got {uid}/{gid}"
+    )
     return Result("user", detail)
 
 
@@ -32,7 +35,8 @@ def _status_value(status: Path, key: str) -> str:
 
 
 def capabilities(status: Path = Path("/proc/self/status")) -> Result:
-    values = {key: _status_value(status, key) for key in ("CapEff", "CapBnd")}
+    sets = ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")
+    values = {key: _status_value(status, key) for key in sets}
     nonzero = [f"{key} is {value}" for key, value in values.items() if value != "0000000000000000"]
     return Result("capabilities", "; ".join(nonzero) or None)
 
@@ -54,16 +58,14 @@ def network(dev: Path = Path("/proc/net/dev")) -> Result:
     return Result("network", detail)
 
 
-def _create_probe(path: Path) -> None:
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    os.close(descriptor)
-    path.unlink()
+def _create_probe(directory: Path) -> None:
+    with tempfile.NamedTemporaryFile(prefix=".runner-selftest-probe-", dir=directory):
+        pass
 
 
 def read_only(name: str, directory: Path, create: Callable[[Path], None] = _create_probe) -> Result:
-    probe = directory / ".runner-selftest-probe"
     try:
-        create(probe)
+        create(directory)
     except OSError as error:
         if error.errno == errno.EROFS:
             return Result(name)
@@ -73,31 +75,24 @@ def read_only(name: str, directory: Path, create: Callable[[Path], None] = _crea
 
 def readable(name: str, directory: Path) -> Result:
     try:
-        entries = list(directory.iterdir())
+        with os.scandir(directory) as entries:
+            empty = next(entries, None) is None
     except OSError as error:
         return Result(name, f"{type(error).__name__}: {error}")
-    detail = None if entries else f"{directory} is empty"
+    detail = f"{directory} is empty" if empty else None
     return Result(name, detail)
 
 
-def scratch(
-    name: str = "scratch",
-    directory: Path = Path("/tmp"),
-    mounts: Path = Path("/proc/self/mounts"),
-) -> Result:
-    probe = directory / ".runner-selftest-probe"
+def scratch(name: str, directory: Path, mounts: Path = Path("/proc/self/mounts")) -> Result:
     try:
-        probe.write_bytes(b"runner-selftest\n")
-        if probe.read_bytes() != b"runner-selftest\n":
-            return Result(name, f"{directory} probe contents changed")
-        probe.unlink()
+        with tempfile.NamedTemporaryFile(prefix=".runner-selftest-probe-", dir=directory) as probe:
+            probe.write(b"runner-selftest\n")
+            probe.flush()
+            probe.seek(0)
+            if probe.read() != b"runner-selftest\n":
+                return Result(name, f"{directory} probe contents changed")
     except OSError as error:
         return Result(name, f"{directory} probe failed: {type(error).__name__}: {error}")
-    finally:
-        try:
-            probe.unlink(missing_ok=True)
-        except OSError:
-            pass
 
     options = None
     for line in mounts.read_text(encoding="ascii").splitlines():
@@ -124,6 +119,6 @@ def run(workspace: Path, templates: list[tuple[str, Path]]) -> list[Result]:
     for label, directory in templates:
         results.append(readable(f"template readable: {label}", directory))
         results.append(read_only(f"template read-only: {label}", directory))
-    results.append(scratch())
+    results.append(scratch("scratch", Path("/tmp")))
     results.append(scratch("home scratch", Path("/home/nonroot")))
     return results

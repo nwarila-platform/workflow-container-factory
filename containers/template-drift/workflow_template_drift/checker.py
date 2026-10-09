@@ -1,11 +1,12 @@
-"""Compare a repository with the templates it follows and report every difference.
+"""Compare a repository with the templates it follows and report every rule it breaks.
 
-A template repository keeps a manifest, ``template-drift.json``, at its root. The manifest is a list
-of checks. Each check names one path and the rule that path must satisfy:
+A template repository keeps a manifest, ``template-drift.json``, at its root: an object holding a
+``version`` and a non-empty list of ``checks``. Each check names one path and the rule that path
+must satisfy:
 
     bytes_equal        the file is byte-for-byte identical to the template's copy
     head_lines_equal   the file's first N lines are identical to the template's first N lines
-    must_exist         a file exists at the path
+    must_exist         a regular file exists at the path
     must_be_absent     nothing exists at the path
 
 This module only reads. It builds a report and an exit status, and never changes the repository.
@@ -57,7 +58,7 @@ class Check:
     mode: str  # a key of SHAPES
     severity: str  # one of SEVERITIES
     target: str  # the path in the repository being checked
-    expected: bytes | None = None  # the template's file; only the two comparing modes have one
+    expected: bytes | None = None  # what the file, or its first head_lines lines, must equal
     head_lines: int | None = None  # how many leading lines to compare; head_lines_equal only
 
 
@@ -67,7 +68,7 @@ def check_repository(
     """Check ``workspace`` against every ``(label, directory)`` template.
 
     Returns the report and the exit status: 0 when the repository passes, 1 when it does not.
-    Raises DriftError when the check cannot be carried out.
+    Raises DriftError when the check cannot be carried out; filesystem errors propagate.
     """
     if not workspace.is_dir():
         raise DriftError(f"workspace {workspace} is not a directory")
@@ -75,8 +76,8 @@ def check_repository(
     for label, directory in templates:
         checks.extend(load_checks(label, directory))
 
-    # Every path has exactly one rule, because two rules for one path could contradict each other.
-    owners = {}
+    # A path may have only one rule, because two rules for one path could contradict each other.
+    owners: dict[str, str] = {}
     for check in checks:
         if check.target in owners:
             raise DriftError(
@@ -118,6 +119,8 @@ def check_repository(
 
 def load_checks(template: str, directory: Path) -> list[Check]:
     """Read one template's manifest and return its checks, refusing anything malformed."""
+    if not directory.is_dir():
+        raise DriftError(f"{template}: {directory} is not a directory")
     if _classify(directory, MANIFEST) != "file":
         raise DriftError(f"{template}: there is no {MANIFEST} file")
     try:
@@ -153,11 +156,9 @@ def find_problem(check: Check, workspace: Path) -> str | None:
         return None
 
     actual = (workspace / check.target).read_bytes()
-    expected = check.expected
     if check.mode == "head_lines_equal":
-        actual = _lines(actual)[: check.head_lines]
-        expected = _lines(expected)[: check.head_lines]
-    return None if actual == expected else "content_mismatch"
+        actual = b"".join(_lines(actual)[: check.head_lines])
+    return None if actual == check.expected else "content_mismatch"
 
 
 def _load_check(template: str, directory: Path, item: object, where: str) -> Check:
@@ -178,7 +179,11 @@ def _load_check(template: str, directory: Path, item: object, where: str) -> Che
         raise DriftError(f"{where}: {mode} takes {accepted}")
     for key in ("path", "source", "target"):
         if key in item and not _is_safe_path(item[key]):
-            raise DriftError(f"{where}: {key} must be a relative path such as docs/guide.md")
+            raise DriftError(
+                f"{where}: {key} must be a relative path such as docs/guide.md; each name may "
+                f"contain only A-Z, a-z, 0-9, '.', '_' and '-' and may not be '.' or '..'; "
+                f"got {item[key]!r}"
+            )
     source = item.get("source", item.get("path"))
     target = item.get("target", item.get("path"))
     if mode in ("must_exist", "must_be_absent"):
@@ -186,15 +191,21 @@ def _load_check(template: str, directory: Path, item: object, where: str) -> Che
 
     # The two comparing modes need the template's file, so a manifest that names a file its own
     # template does not have is refused here, whatever the repository being checked looks like.
-    if _classify(directory, source) != "file":
+    try:
+        found = _classify(directory, source)
+    except DriftError as error:
+        raise DriftError(f"{where}: in the template, {error}") from None
+    if found != "file":
         raise DriftError(f"{where}: the template has no file {source}")
     expected = (directory / source).read_bytes()
     head_lines = item.get("head_lines")
     if mode == "head_lines_equal":
         if type(head_lines) is not int or head_lines < 1:
             raise DriftError(f"{where}: head_lines must be a whole number, 1 or more")
-        if len(_lines(expected)) < head_lines:
+        lines = _lines(expected)
+        if len(lines) < head_lines:
             raise DriftError(f"{where}: {source} has fewer than {head_lines} lines")
+        expected = b"".join(lines[:head_lines])
     return Check(template, mode, severity, target, expected, head_lines)
 
 
@@ -220,7 +231,8 @@ def _classify(root: Path, path: str) -> str:
 
     No part of ``path`` is followed through a symbolic link, so a repository cannot satisfy a rule
     by pointing at a file kept somewhere else. A link at the path itself is "other". A link above
-    the path stops the check, because whatever lies beyond it is not part of the tree being checked.
+    the path stops the check: following it could leave the tree being checked, and calling the path
+    "missing" would let a link hide a file that must be absent.
     """
     *parents, name = path.split("/")
     current = root
@@ -238,7 +250,7 @@ def _classify(root: Path, path: str) -> str:
 
 
 def _kind(path: Path) -> int | None:
-    """Return the file-type bits of ``path`` itself, never of a link's target; None if absent."""
+    """Return the mode of ``path`` itself, never of a link's target; None if absent."""
     try:
         return path.lstat().st_mode
     except FileNotFoundError:

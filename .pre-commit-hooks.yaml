@@ -1,5 +1,6 @@
 - id: template-drift
   name: template drift
+  description: Report drift from the locked templates with the signature-verified template-drift image.
   language: script
   entry: containers/template-drift/hook/template-drift-hook.sh
   pass_filenames: false

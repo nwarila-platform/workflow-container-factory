@@ -1,4 +1,8 @@
-"""Command line for reporting the workflow runner's isolation."""
+"""The command line: read the arguments, run the checks, print the report.
+
+Exit status: 0 every check passed, 1 at least one check failed, 2 the selftest could not run.
+The runner requires the PASS summary to be the report's final line when the command exits 0.
+"""
 
 import argparse
 import os
@@ -12,18 +16,23 @@ LABEL = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
 
 def _template(value: str) -> tuple[str, Path]:
-    label, separator, directory = value.partition("=")
-    if not (separator and LABEL.fullmatch(label) and directory):
+    label, _, directory = value.partition("=")
+    if not (LABEL.fullmatch(label) and directory):
         raise argparse.ArgumentTypeError(f"expected OWNER/REPO=DIRECTORY, got {value!r}")
     return label, Path(directory)
 
 
-def _write(report: str) -> None:
-    data = report.encode()
+def _write(file_descriptor: int, text: str) -> None:
+    """Write directly, without Python's output buffer.
+
+    A buffered write that fails may be discovered only while the interpreter exits, after the exit
+    status has been chosen. Written directly, a report that cannot be delivered is an error here.
+    """
+    data = text.encode()
     while data:
-        written = os.write(sys.stdout.fileno(), data)
+        written = os.write(file_descriptor, data)
         if written == 0:
-            raise OSError("could not write the report")
+            raise OSError("could not write output")
         data = data[written:]
 
 
@@ -33,13 +42,31 @@ def main() -> int:
         description="Report whether the workflow container runner's isolation holds.",
         allow_abbrev=False,
     )
-    parser.add_argument("--workspace", required=True, type=Path, metavar="DIRECTORY")
     parser.add_argument(
-        "--template", required=True, action="append", type=_template, metavar="OWNER/REPO=DIRECTORY"
+        "--workspace",
+        required=True,
+        type=Path,
+        metavar="DIRECTORY",
+        help="the mounted workspace, which must be nonempty and read-only",
     )
-    parser.add_argument("--format", choices=("text",), default="text")
+    parser.add_argument(
+        "--template",
+        required=True,
+        action="append",
+        type=_template,
+        metavar="OWNER/REPO=DIRECTORY",
+        help="a mounted template and the name to report it under; repeat for each template",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("text",),
+        default="text",
+        help="the report format; text is the only one, and the organization's runner passes it",
+    )
     arguments = parser.parse_args()
 
+    # Status 1 means "a check failed", and Python itself exits with 1 on an uncaught exception.
+    # Catch runtime failures, including an undeliverable report, so they exit with status 2.
     try:
         results = run(arguments.workspace, arguments.template)
         failed = sum(not result.passed for result in results)
@@ -51,9 +78,15 @@ def main() -> int:
             lines.append(f"runner-selftest: FAIL ({len(results)} checks, {failed} failed)")
         else:
             lines.append(f"runner-selftest: PASS ({len(results)} checks)")
-        _write("\n".join(lines) + "\n")
+        _write(sys.stdout.fileno(), "\n".join(lines) + "\n")
     except Exception as error:
-        print(f"runner-selftest: error: {type(error).__name__}: {error}", file=sys.stderr)
+        try:
+            _write(
+                sys.stderr.fileno(),
+                f"runner-selftest: error: {type(error).__name__}: {error}\n",
+            )
+        except Exception:
+            pass
         return 2
     return 1 if failed else 0
 

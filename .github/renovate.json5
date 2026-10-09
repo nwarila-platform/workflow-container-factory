@@ -1,15 +1,42 @@
 {
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
   extends: [
     "github>nwarila-platform/pdq-deploy-inventory//.github/renovate.json5",
   ],
+  enabledManagers: ["github-actions", "dockerfile", "custom.regex"],
+  customManagers: [
+    {
+      customType: "regex",
+      managerFilePatterns: ["/^\\.github/workflows/(build|ci)\\.yaml$/"],
+      matchStrings: [
+        "(?<depName>docker\\.io/(?:docker/buildkit-syft-scanner|moby/buildkit)):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})",
+      ],
+      datasourceTemplate: "docker",
+    },
+    {
+      customType: "regex",
+      managerFilePatterns: ["/^\\.github/workflows/(build|ci)\\.yaml$/"],
+      matchStrings: [
+        "(?<depName>docker\\.io/tonistiigi/binfmt):(?<currentValue>qemu-v[0-9]+\\.[0-9]+\\.[0-9]+)@(?<currentDigest>sha256:[a-f0-9]{64})",
+      ],
+      datasourceTemplate: "docker",
+      versioningTemplate: "regex:^qemu-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
+    },
+    {
+      customType: "regex",
+      managerFilePatterns: ["/^\\.github/workflows/runner-acceptance\\.yaml$/"],
+      matchStrings: [
+        "selftest:\\n(?:[^\\n]*\\n)*?\\s+name: runner-selftest\\n\\s+version: (?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)\\n\\s+contract: 2\\n\\s+digest: (?<currentDigest>sha256:[a-f0-9]{64})",
+      ],
+      depNameTemplate: "ghcr.io/nwarila-platform/workflow-runner-selftest",
+      datasourceTemplate: "docker",
+    },
+  ],
   packageRules: [
     {
-      matchPackageNames: [
-        "nwarila-platform/**",
-        "NWarila/**",
-        "ghcr.io/nwarila-platform/**",
-      ],
+      matchPackageNames: ["ghcr.io/nwarila/**"],
       minimumReleaseAge: null,
+      semanticCommitType: "fix",
     },
   ],
 }

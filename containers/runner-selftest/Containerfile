@@ -1,6 +1,9 @@
-# The image is the organization's Python base image plus this package. Tests and tools stay outside.
-FROM ghcr.io/nwarila/ubi9-base-python:base-python@sha256:0ee8545f8ccd37a2aeda5c0dde33c0fcc9fe5969092c8b6e8228efc2c5fe826d
+FROM ghcr.io/nwarila/ubi9-base-python:base-python@sha256:29f17238f22163444b7bd0e7e6d4897de9f09f1ab1f39af78088c6e08d7c3cf1
 
+LABEL org.opencontainers.image.title="workflow-runner-selftest" \
+      org.opencontainers.image.description="Reports whether the workflow container runner's isolation holds"
+
+# The true requirements ask the shared runner for scratch tmpfs mounts and pinned template checkouts.
 LABEL org.nwarila.workflow.scratch="true" \
       org.nwarila.workflow.full-history="false" \
       org.nwarila.workflow.second-input="true" \
@@ -9,6 +12,6 @@ LABEL org.nwarila.workflow.scratch="true" \
 
 COPY --chown=0:0 --chmod=0755 runner_selftest/ /usr/lib/python3.12/site-packages/runner_selftest/
 
-# Run unprivileged. -I isolates Python from environment variables and from the current directory.
+# -I ignores PYTHON* environment variables, the user site directory, and the current working directory.
 USER 65532:65532
-ENTRYPOINT ["/usr/bin/python3.12", "-I", "-m", "runner_selftest"]
+ENTRYPOINT ["/usr/bin/python3.12", "-I", "-B", "-m", "runner_selftest"]

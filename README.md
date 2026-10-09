@@ -1,186 +1,189 @@
-# workflow-container-factory
+<!-- markdownlint-configure-file {"MD013":{"code_blocks":false,"tables":false}} -->
 
-[![CI](https://github.com/nwarila-platform/workflow-container-factory/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/nwarila-platform/workflow-container-factory/actions/workflows/ci.yaml?query=branch%3Amain)
+# Workflow container factory
 
-This repository builds and releases the organization's workflow containers. It gives independently
-versioned checks one CI gate, one release process, and verifiable supply-chain evidence.
-
-## What a workflow container is
-
-A workflow container is a small image that a CI workflow runs as one check. The organization's shared
-runner gives it no network access, a read-only root file system, and no Linux capabilities. Factory
-images run as user and group ID `65532`.
-
-## What every release carries
-
-Each release provides one multi-architecture image for `linux/amd64` and `linux/arm64`. The release
-workflow pushes the image by digest first. After the image and its evidence pass verification, the
-workflow adds a version tag and a `sha-<commit>` tag. It never adds a `latest` tag.
-
-The image index and both architecture-specific images have keyless Sigstore signatures. Their exact
-certificate identity is:
-
-```text
-https://github.com/nwarila-platform/workflow-container-factory/.github/workflows/build.yaml@refs/tags/<name>/v<version>
-```
-
-The image index also has a GitHub build-provenance attestation. Each architecture has an SPDX
-software bill of materials (SBOM) bound to that architecture's image digest.
-
-An immutable GitHub Release completes the release. It contains a digests file, both SPDX SBOMs, and
-the GitHub provenance bundle.
-
-## Why the identity can be trusted
-
-A release-tag push runs the workflow files from the tagged commit. For that reason, repository rules
-allow only repository administrators and one write deploy key to create or update
-`<name>/v<version>` tags. The private half of that key is stored as a secret in the `release`
-environment, and only `main` may use that environment. For non-administrators, repository rules require
-the tagged commit to be signed and prevent deleting or force-moving tags. The release workflow separately
-requires a signed annotated tag object. Published GitHub Releases are immutable.
-
-The organization's [shared runner](https://github.com/nwarila-platform/.github/blob/main/.github/workflows/run-container.yaml)
-verifies the image by digest and requires the exact certificate identity above. It then requires all
-five requirement labels before it runs the image.
-
-## How a release happens
-
-1. A releasable change to a container lands on `main`.
-2. release-please opens or updates that container's release pull request.
-3. Merging the release pull request updates the container's version and changelog.
-4. The tagging job creates a signed tag and pushes it with the deploy key.
-5. The tag starts the release workflow, which checks the tag, builds and tests both architectures,
-   signs and attests the image, verifies the evidence, and promotes the digest to the two image tags.
-6. The repository owner runs `tools/github-release.sh` to publish the GitHub Release and its evidence.
-
-```mermaid
-flowchart LR
-  A["Releasable commit"] --> B["Release pull request<br/>(release-please)"]
-  B --> C["Merge"]
-  C --> D["Signed tag pushed<br/>with the deploy key"]
-  D --> E["Release workflow<br/>check, build, test, sign, attest, verify, promote"]
-  E --> F["Repository owner publishes<br/>the GitHub Release"]
-```
-
-The final step is manual because GitHub does not let the workflow token create a release for a
-protected tag in this organization repository. An organization-owned GitHub App is the planned way
-to automate that step.
-
-## Verify a release yourself
-
-The first check needs [Crane](https://github.com/google/go-containerregistry/tree/main/cmd/crane),
-[Cosign](https://docs.sigstore.dev/cosign/system_config/installation/), and an authenticated
-[GitHub CLI](https://cli.github.com/). Set `name` and `version` to a release listed on the
-[Releases page](https://github.com/nwarila-platform/workflow-container-factory/releases).
-
-```sh
-name='<container name>'
-version='<release version>'
-image="ghcr.io/nwarila-platform/workflow-${name}"
-digest=$(crane digest "${image}:${version}")
-
-cosign verify "${image}@${digest}" \
-  --certificate-identity "https://github.com/nwarila-platform/workflow-container-factory/.github/workflows/build.yaml@refs/tags/${name}/v${version}" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --output text
-gh attestation verify "oci://${image}@${digest}" \
-  --repo nwarila-platform/workflow-container-factory \
-  --signer-workflow nwarila-platform/workflow-container-factory/.github/workflows/build.yaml \
-  --source-ref "refs/tags/${name}/v${version}"
-```
-
-The second check needs an authenticated GitHub CLI and standard `awk` and `mktemp` utilities. It
-downloads every GitHub Release asset and verifies the saved provenance bundle.
-
-```sh
-name='<container name>'
-version='<release version>'
-image="ghcr.io/nwarila-platform/workflow-${name}"
-release_dir=$(mktemp -d)
-
-gh release download "${name}/v${version}" \
-  --repo nwarila-platform/workflow-container-factory \
-  --dir "$release_dir"
-digest=$(awk '$1 == "index" { print $2 }' \
-  "$release_dir/${name}-${version}-digests.txt")
-gh attestation verify "oci://${image}@${digest}" \
-  --bundle "$release_dir/${name}-${version}-provenance.sigstore.json" \
-  --repo nwarila-platform/workflow-container-factory \
-  --signer-workflow nwarila-platform/workflow-container-factory/.github/workflows/build.yaml \
-  --source-ref "refs/tags/${name}/v${version}"
-```
-
-## Requirement labels
-
-Every image declares five labels with a value of `true` or `false`. They tell the runner which inputs
-and permissions the check needs:
-
-- `org.nwarila.workflow.scratch` asks for a writable, restricted `/tmp` mount.
-- `org.nwarila.workflow.full-history` asks for a workspace checkout with full Git history.
-- `org.nwarila.workflow.second-input` asks for pinned template checkouts mounted read-only.
-- `org.nwarila.workflow.sarif` says the check produces a SARIF report for the runner to upload.
-- `org.nwarila.workflow.image-input` asks the runner to make a separately built image available to the
-  check.
+This repository builds the single-purpose containers that organization
+repositories run through the shared workflow-container runner. Each image has
+one checker, an explicit command-line and exit-status contract, and the
+requirement labels understood by runner contract 2. Releases are pinned by
+version and digest, signed with GitHub Actions' keyless identity, and
+accompanied by build provenance and per-platform SPDX SBOMs.
 
 ## Containers
 
-| Name | What it checks | Image | Documentation |
-| --- | --- | --- | --- |
-| `runner-selftest` | The isolation applied by the shared runner | `ghcr.io/nwarila-platform/workflow-runner-selftest` | [README](containers/runner-selftest/README.md) |
-| `template-drift` | A repository's files against pinned templates | `ghcr.io/nwarila-platform/workflow-template-drift` | [README](containers/template-drift/README.md) |
+### template-drift
 
-See the [Releases page](https://github.com/nwarila-platform/workflow-container-factory/releases) for
-available versions.
+[`template-drift`](containers/template-drift/README.md) compares a repository
+with one or more pinned template checkouts. Template-owned manifests define
+byte, leading-line, presence, and absence checks. The container only reports
+differences; it does not edit the repository.
+
+Current release: `3.1.1` at
+`sha256:66a05581898761be72ffbc19c355662b6fd311c6b59573c2b76aa2a7c6c76834`.
+
+### runner-selftest
+
+[`runner-selftest`](containers/runner-selftest/README.md) probes the environment
+created by the shared runner. It checks the user and group, Linux capabilities,
+no-new-privileges setting, network interfaces, read-only mounts, and the two
+scratch mounts. It diagnoses isolation; it does not establish that isolation.
+
+Current release: `1.1.0` at
+`sha256:44ec1f7813f872af2587fae4d6006de1919c3a2ae3ebf417bc429ac7332b2ac6`.
+
+## Use a container in a repository
+
+Call the organization workflow with `contents: read` and
+`security-events: write`. Pin the workflow itself to a commit, and give the
+runner the image name, version, contract, and index digest. This example runs
+the current `template-drift` release:
+
+```yaml
+jobs:
+  template-drift:
+    permissions:
+      contents: read
+      security-events: write
+    uses: nwarila-platform/.github/.github/workflows/run-container.yaml@95ca3c2332c8037f1ede76d1c2bd1a6b6ee43d4f
+    with:
+      name: template-drift
+      # renovate: datasource=docker depName=ghcr.io/nwarila-platform/workflow-template-drift
+      version: 3.1.1
+      digest: sha256:66a05581898761be72ffbc19c355662b6fd311c6b59573c2b76aa2a7c6c76834
+      contract: 2
+```
+
+The runner verifies that the signature identity matches the requested name and
+version, that the version tag resolves to the pinned digest, and that the
+image's requirement labels are valid. It then mounts the checkout and any locked
+templates read-only, disables networking, drops all capabilities, enables
+no-new-privileges, and restores the checker's `0`, `1`, or `2` status.
+
+The `renovate` comment and adjacent `version` and `digest` fields match the
+organization's custom manager. Renovate therefore updates the version and digest
+together. Its GitHub Actions manager updates the commit pin on `uses`
+separately. A `template-drift` caller also needs the identity and lock files
+described in the [container documentation](containers/template-drift/README.md).
+
+## Verify an image
+
+Install Cosign, then verify the immutable digest rather than the tag:
+
+```sh
+cosign verify \
+  'ghcr.io/nwarila-platform/workflow-template-drift@sha256:66a05581898761be72ffbc19c355662b6fd311c6b59573c2b76aa2a7c6c76834' \
+  --certificate-identity \
+  'https://github.com/nwarila-platform/workflow-container-factory/.github/workflows/build.yaml@refs/tags/template-drift/v3.1.1' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-github-workflow-repository nwarila-platform/workflow-container-factory \
+  --certificate-github-workflow-ref refs/tags/template-drift/v3.1.1
+```
+
+A successful result proves that the exact digest has a valid Sigstore signature
+issued to this repository's `build.yaml` workflow on the `template-drift/v3.1.1`
+tag. The shared runner additionally checks that the version tag resolves to the
+pinned digest. Neither check inspects the container's behavior.
+
+Verify the index's GitHub build-provenance attestation separately:
+
+```sh
+gh attestation verify \
+  'oci://ghcr.io/nwarila-platform/workflow-template-drift@sha256:66a05581898761be72ffbc19c355662b6fd311c6b59573c2b76aa2a7c6c76834' \
+  --repo nwarila-platform/workflow-container-factory \
+  --signer-workflow nwarila-platform/workflow-container-factory/.github/workflows/build.yaml \
+  --source-ref refs/tags/template-drift/v3.1.1
+```
+
+## Release flow
+
+1. A conventional commit that changes `containers/<name>/`, such as
+   `fix: reject an invalid manifest`, lands on `main`. Release Please routes the
+   commit to a container by the paths it changes.
+2. Release Please maintains a separate release pull request for each container.
+   The pull request updates its `VERSION`, changelog, and the release manifest.
+3. After that pull request is merged, the Release Please workflow
+   (`release-please.yaml`) creates and pushes a signed annotated tag named
+   `<container>/v<X.Y.Z>`.
+4. The tag workflow requires a verified tag reachable from `main`, builds Linux
+   AMD64 and ARM64 images, tests both children, attaches SPDX SBOMs, signs the
+   index and children recursively, creates GitHub build provenance for the
+   index. Its registry reads during verification are anonymous, while
+   `gh attestation verify` uses the workflow token.
+5. Only after verification does the workflow create the version and
+   source-commit tags in GHCR.
+6. The owner checks out the current clean `main` branch and publishes the GitHub
+   Release:
+
+   ```sh
+   tools/github-release.sh template-drift/v3.1.1
+   ```
+
+   The organization's tag ruleset limits creation and updates of version tags
+   and releases to the deploy key and administrators, so the workflow token
+   cannot create the GitHub Release. The owner-run command rechecks the signed
+   tag, image index, child images, signatures, provenance, and SBOMs before
+   publishing four release assets. Published releases are immutable, so this
+   separate step prevents incomplete or unverified evidence from becoming the
+   permanent release record.
 
 ## Repository layout
 
-- `containers/` contains each container's source, `Containerfile`, version, tests, and example.
-- `tools/check-labels.sh` validates the five requirement labels.
-- `tools/check-index.py` validates the multi-architecture image and confirms that each architecture has
-  its own SPDX SBOM.
-- `tools/test_check_index.py` tests the index validator without a registry.
-- `tools/install-crane.sh` installs the reviewed Crane version used by the workflows.
-- `tools/github-release.sh` verifies and publishes an immutable GitHub Release.
-- `.github/workflows/` contains continuous integration, release automation, and runner acceptance.
-- `release-please-config.json` and `.release-please-manifest.json` configure independent releases for
-  each container.
-
-## Continuous integration
-
-`ci.yaml` runs for pull requests and pushes to `main`. For every container, it runs host tests and,
-independently, builds, checks, and tests the image on both release architectures. Its `CI result` job
-waits for and combines those results into one stable required check.
-
-`release-please.yaml` maintains per-container release pull requests and creates signed release tags
-after they merge. `release.yaml` checks a pushed release tag and calls `build.yaml`. That reusable
-workflow builds, tests, signs, attests, verifies, and promotes the image. `runner-acceptance.yaml` proves
-that the organization's shared runner accepts a valid factory image and refuses invalid combinations.
-
-## Publishing a GitHub Release (repository owner)
-
-From a clean checkout of the current `main` that contains the release commit, run:
-
-```sh
-tools/github-release.sh '<name>/v<version>'
+```text
+containers/
+  runner-selftest/        Probe, Containerfile, examples, and tests
+  template-drift/         Checker, hook, Containerfile, examples, and tests
+.github/workflows/
+  ci.yaml                 Host and image tests on pull requests and main
+  release-please.yaml     Release pull requests and signed release tags
+  release.yaml            Tag validation and release entry point
+  build.yaml              Build, test, sign, attest, verify, and promote
+  runner-acceptance.yaml  Contract-2 acceptance and refusal cases
+tools/                    Image validation and GitHub Release scripts
 ```
 
-The command needs `gh` authenticated as a repository administrator, plus `git`, `crane`, `cosign`,
-`curl`, `jq`, and `python3`. Before it writes to the GitHub Release, it checks the checkout, the signed
-annotated tag, the tag commit's reachability from `main`, and the immutable-release setting. It also
-checks the image index and SBOMs, every image signature, and the GitHub provenance. It then creates a
-missing release, repairs a draft, or verifies an already published release.
+Each container owns its source, `Containerfile`, `VERSION`, changelog, examples,
+and host and image tests. The top-level release manifest keeps the independently
+released versions.
 
-## Status and next steps
+## Test locally
 
-Consumers still use the standalone `workflow-template-drift` repository's image until they are moved
-to the factory image. The shared runner still needs to provide full Git history and pull-request base
-access, SARIF upload, and a built-image input. Further work will add nightly rebuilds for scanners that
-carry vulnerability databases, add the first scanner containers, and move consumers to factory images.
+The host suites need Bash, Python 3, Git, and `jq`. The `template-drift` suite also
+exercises its hook with local fakes for Git, Cosign, Docker, and Podman:
 
-## Security
+```sh
+bash containers/template-drift/tests/host.sh
+bash containers/runner-selftest/tests/host.sh
+python3 tools/test_check_index.py
+python3 tools/test_check_labels.py
+```
 
-See [SECURITY.md](SECURITY.md) for supported versions and vulnerability reporting.
+Image suites need a working Docker or Podman engine. Build and run one
+architecture as follows; set `CONTAINER_RUNTIME=podman` for Podman:
 
-## License
+```sh
+docker build -f containers/template-drift/Containerfile -t workflow-template-drift:test containers/template-drift
+bash containers/template-drift/tests/image.sh workflow-template-drift:test linux/amd64
 
-This repository is licensed under the [MIT License](LICENSE).
+docker build -f containers/runner-selftest/Containerfile -t workflow-runner-selftest:test containers/runner-selftest
+bash containers/runner-selftest/tests/image.sh workflow-runner-selftest:test linux/amd64
+```
+
+With Podman, use the same contexts and Containerfiles:
+
+```sh
+podman build -f containers/template-drift/Containerfile -t workflow-template-drift:test containers/template-drift
+CONTAINER_RUNTIME=podman bash containers/template-drift/tests/image.sh workflow-template-drift:test linux/amd64
+
+podman build -f containers/runner-selftest/Containerfile -t workflow-runner-selftest:test containers/runner-selftest
+CONTAINER_RUNTIME=podman bash containers/runner-selftest/tests/image.sh workflow-runner-selftest:test linux/amd64
+```
+
+CI repeats every host suite and builds and tests each image on Linux AMD64 and
+ARM64.
+
+## Status
+
+This repository is maintained. The current supported releases are
+`template-drift` 3.1.1 and `runner-selftest` 1.1.0. The
+[security policy](SECURITY.md) describes support and vulnerability reporting.
+The project is licensed under the [MIT License](LICENSE).
