@@ -36,6 +36,31 @@ meets the selected failure threshold. Exit status `2` means the check could not 
 invalid arguments, a malformed manifest, an unreadable compared file, or an incomplete report
 write.
 
+## Pre-commit hook
+
+The factory provides a `template-drift` hook for the `pre-push` stage. It verifies the image's
+keyless signature, fetches each locked public template anonymously, and runs the verified image by
+digest with the same read-only mounts and runtime restrictions used in CI.
+
+The hook requires `git`, `jq`, `python3`, `cosign`, and either a working Docker daemon or rootless
+Podman. It uses `$TEMPLATE_DRIFT_ENGINE` when that variable is set to `docker` or `podman`; otherwise
+it tries Docker first and then Podman, choosing the first engine whose `info` command succeeds.
+
+Add the released hook to a consumer's `.pre-commit-config.yaml`, replacing `X` and the revision with
+the release's version and peeled tag commit:
+
+```yaml
+repos:
+  - repo: https://github.com/nwarila-platform/workflow-container-factory
+    rev: <commit of template-drift/vX> # frozen: X
+    hooks:
+      - id: template-drift
+```
+
+The local hook has a deliberately narrower trust model than the CI runner: it verifies signatures
+and exact locked commits, but it does not prove default-branch reachability or reject a lock
+non-rewind. CI's runner performs both checks on every pull request and push and remains authoritative.
+
 ## Bundled example
 
 The `example/` directory contains a small template and a repository that has drifted from it. The

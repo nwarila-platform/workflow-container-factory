@@ -21,6 +21,7 @@
 !/containers/template-drift/example/
 !/containers/template-drift/example/repository/
 !/containers/template-drift/example/template/
+!/containers/template-drift/hook/
 !/containers/template-drift/tests/
 !/containers/template-drift/workflow_template_drift/
 !/tools/
@@ -64,6 +65,7 @@
 !/containers/template-drift/workflow_template_drift/__init__.py
 !/containers/template-drift/workflow_template_drift/__main__.py
 !/containers/template-drift/workflow_template_drift/checker.py
+!/containers/template-drift/hook/template-drift-hook.sh
 
 # Continuous integration, release workflows, ownership, and dependency updates.
 !/.github/workflows/ci.yaml
@@ -88,5 +90,6 @@
 !/.editorconfig
 !/.gitattributes
 !/.gitignore
+!/.pre-commit-hooks.yaml
 !/.release-please-manifest.json
 !/release-please-config.json
