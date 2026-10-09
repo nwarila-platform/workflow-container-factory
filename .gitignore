@@ -21,6 +21,7 @@
 !/containers/template-drift/example/
 !/containers/template-drift/example/repository/
 !/containers/template-drift/example/template/
+!/containers/template-drift/hook/
 !/containers/template-drift/tests/
 !/containers/template-drift/workflow_template_drift/
 !/tools/
@@ -44,7 +45,7 @@
 !/.github/.config/runner-selftest.yaml
 !/.github/.config/runner-selftest.lock
 
-# The template-drift checker, image, tests, and example.
+# The template-drift checker, image, pre-commit hook, tests, and example.
 !/containers/template-drift/Containerfile
 !/containers/template-drift/.dockerignore
 !/containers/template-drift/VERSION
@@ -58,6 +59,7 @@
 !/containers/template-drift/example/template/lint.toml
 !/containers/template-drift/example/template/pipeline.yaml
 !/containers/template-drift/example/template/template-drift.json
+!/containers/template-drift/hook/template-drift-hook.sh
 !/containers/template-drift/tests/host.sh
 !/containers/template-drift/tests/image.sh
 !/containers/template-drift/tests/test_checker.py
@@ -88,5 +90,6 @@
 !/.editorconfig
 !/.gitattributes
 !/.gitignore
+!/.pre-commit-hooks.yaml
 !/.release-please-manifest.json
 !/release-please-config.json

@@ -1,0 +1,7 @@
+- id: template-drift
+  name: template drift
+  language: script
+  entry: containers/template-drift/hook/template-drift-hook.sh
+  pass_filenames: false
+  always_run: true
+  stages: [pre-push]
