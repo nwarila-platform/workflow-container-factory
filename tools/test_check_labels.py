@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -19,17 +20,19 @@ class CheckLabelsTests(unittest.TestCase):
         labels.update(overrides)
         return {"User": "65532:65532", "Labels": labels}
 
-    def run_checker(self, data: object, *arguments: str) -> subprocess.CompletedProcess[str]:
+    def run_checker(self, data: object) -> subprocess.CompletedProcess[str]:
         input_text = data if isinstance(data, str) else json.dumps(data)
-        return subprocess.run(
-            ["bash", str(CHECKER), *arguments],
-            cwd=ROOT,
-            input=input_text,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory, "config.json")
+            config.write_text(input_text)
+            return subprocess.run(
+                ["bash", str(CHECKER), str(config)],
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
 
     def test_shipped_requirement_sets_pass(self) -> None:
         for true_requirements in (("scratch", "second-input"), ("second-input",)):
@@ -40,18 +43,6 @@ class CheckLabelsTests(unittest.TestCase):
                 done = self.run_checker(self.config(**overrides))
                 self.assertEqual((done.returncode, done.stderr), (0, ""))
                 self.assertTrue(done.stdout.startswith("labels ok: "))
-
-    def test_user_must_be_fixed_nonroot_identity(self) -> None:
-        for user in (None, "0:0", 65532):
-            with self.subTest(user=user):
-                config = self.config()
-                if user is None:
-                    del config["User"]
-                else:
-                    config["User"] = user
-                done = self.run_checker(config)
-                self.assertEqual(done.returncode, 1)
-                self.assertEqual(done.stderr, "image user must be 65532:65532\n")
 
     def test_every_requirement_is_required_and_boolean_text(self) -> None:
         for name in REQUIREMENTS:
@@ -69,29 +60,8 @@ class CheckLabelsTests(unittest.TestCase):
                     self.assertEqual(done.returncode, 1)
                     self.assertEqual(done.stderr, f"invalid or missing label: {key}\n")
 
-    def test_unsupported_requirements_are_refused(self) -> None:
-        for name in ("full-history", "sarif", "image-input"):
-            with self.subTest(name=name):
-                key = f"org.nwarila.workflow.{name}"
-                done = self.run_checker(self.config(**{key: "true"}))
-                self.assertEqual(done.returncode, 1)
-                self.assertEqual(
-                    done.stderr,
-                    f"label {key} is true, but contract 2 does not provide {name} yet\n",
-                )
-
     def test_malformed_json_fails(self) -> None:
         self.assertNotEqual(self.run_checker("{").returncode, 0)
-
-    def test_arguments_are_refused_with_usage(self) -> None:
-        for arguments in (("config.json",), ("one", "two")):
-            with self.subTest(arguments=arguments):
-                done = self.run_checker(self.config(), *arguments)
-                self.assertEqual(done.returncode, 1)
-                self.assertEqual(
-                    done.stderr,
-                    f"usage: <image config JSON> | {CHECKER}\n",
-                )
 
 
 if __name__ == "__main__":

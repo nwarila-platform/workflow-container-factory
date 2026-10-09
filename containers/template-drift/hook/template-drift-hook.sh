@@ -92,7 +92,7 @@ def read(path):
     if not raw.endswith(b"\n") or b"\r" in raw or b"\0" in raw:
         fail(f"invalid LF grammar: {path}")
     try:
-        return raw.decode("ascii").split("\n")[:-1]
+        return raw.decode("ascii").splitlines()
     except UnicodeDecodeError:
         fail(f"non-ASCII input: {path}")
 
@@ -134,6 +134,7 @@ PY
 temporary_directory=$(mktemp -d) || fail "cannot create a temporary directory"
 # Git exports repository variables to hooks in linked worktrees and submodules. Clear them before
 # operating on the template checkouts so those commands cannot alter the consumer repository.
+# Keep GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT: they carry the command-scoped `git -c` settings.
 repository_variables=$(git rev-parse --local-env-vars | grep -vx \
   -e GIT_CONFIG_PARAMETERS -e GIT_CONFIG_COUNT) || fail "cannot list Git repository variables"
 # shellcheck disable=SC2086 # Git prints one variable name per line.

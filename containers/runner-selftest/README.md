@@ -13,9 +13,9 @@ Current release: `1.1.0` at
 
 ## Checks
 
-The report covers:
+This source reports whether:
 
-- effective UID and GID are `65532:65532`;
+- UID and GID are `65532:65532`;
 - inherited, permitted, effective, bounding, and ambient Linux capability sets
   are empty;
 - `NoNewPrivs` is enabled;
@@ -23,8 +23,8 @@ The report covers:
 - the image root is read-only;
 - the workspace is nonempty, readable, and read-only;
 - every template is nonempty, readable, and read-only; and
-- `/tmp` and `/home/nonroot` are writable tmpfs mounts with `nosuid`, `nodev`,
-  and `noexec`.
+- `/tmp` and `/home/nonroot` are writable, mounted `nosuid`, `nodev` and
+  `noexec` (the runner uses tmpfs).
 
 The probes create temporary files only where they are testing writability. They
 do not alter the read-only workspace or template mounts.
@@ -72,7 +72,14 @@ The status is:
 
 ## Run locally
 
-From this directory, Docker can reproduce the runner's passing environment:
+From this directory, first make the mounted example world-readable because the
+image runs as user `65532:65532`:
+
+```sh
+chmod -R a+rX example
+```
+
+Docker can then reproduce the runner's passing environment:
 
 ```sh
 docker run --rm --network=none --read-only --cap-drop=ALL \
@@ -87,26 +94,30 @@ docker run --rm --network=none --read-only --cap-drop=ALL \
   --format text
 ```
 
-With Podman, replace `docker` with `podman`, add
-`--userns=keep-id:uid=65532,gid=65532`, and add `notmpcopyup` to both `--tmpfs`
-option lists.
+With Podman, replace `docker` with `podman` and add `notmpcopyup` to both
+`--tmpfs` option lists.
 
-To build and test the working tree instead:
+To build and test the working tree from the repository root instead:
 
 ```sh
-bash tests/host.sh
-docker build -t workflow-runner-selftest:test .
-bash tests/image.sh workflow-runner-selftest:test linux/amd64
+bash containers/runner-selftest/tests/host.sh
+docker build -f containers/runner-selftest/Containerfile -t workflow-runner-selftest:test containers/runner-selftest
+bash containers/runner-selftest/tests/image.sh workflow-runner-selftest:test linux/amd64
 ```
 
-Set `CONTAINER_RUNTIME=podman` on the image-test command to use Podman. The
-image suite first requires the full passing report, then removes one isolation
-flag at a time and requires only the corresponding probe to fail.
+For Podman:
+
+```sh
+podman build -f containers/runner-selftest/Containerfile -t workflow-runner-selftest:test containers/runner-selftest
+CONTAINER_RUNTIME=podman bash containers/runner-selftest/tests/image.sh workflow-runner-selftest:test linux/amd64
+```
+
+The image suite first requires the full passing report, then removes one
+isolation flag at a time and requires only the corresponding probe to fail.
 
 ## Run in CI
 
-The repository's acceptance workflow uses the current release through the shared
-runner:
+A caller looks like this:
 
 ```yaml
 jobs:

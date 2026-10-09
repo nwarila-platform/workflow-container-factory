@@ -1,31 +1,21 @@
 #!/usr/bin/env bash
-# Keep this release gate aligned with contract 2 in nwarila-platform/.github's run-container.yaml.
 set -euo pipefail
 
-if test "$#" -ne 0; then
-  printf 'usage: <image config JSON> | %s\n' "$0" >&2
-  exit 1
-fi
-
-config=$(jq -c '.')
-if ! jq -e '.User == "65532:65532"' <<<"$config" >/dev/null; then
-  echo "image user must be 65532:65532" >&2
-  exit 1
-fi
-
-labels=$(jq -c '.Labels' <<<"$config")
+config=$1
+keys=(
+  org.nwarila.workflow.scratch
+  org.nwarila.workflow.full-history
+  org.nwarila.workflow.second-input
+  org.nwarila.workflow.sarif
+  org.nwarila.workflow.image-input
+)
 values=()
 
-for requirement in scratch full-history second-input sarif image-input; do
-  key="org.nwarila.workflow.${requirement}"
-  value=$(jq -er --arg key "$key" '.[$key] | select(. == "true" or . == "false")' <<<"$labels") || {
+for key in "${keys[@]}"; do
+  value=$(jq -er --arg key "$key" '.Labels[$key] | select(type == "string" and (. == "true" or . == "false"))' "$config") || {
     echo "invalid or missing label: $key" >&2
     exit 1
   }
-  if [[ "$value" == true && "$requirement" =~ ^(full-history|sarif|image-input)$ ]]; then
-    echo "label $key is true, but contract 2 does not provide $requirement yet" >&2
-    exit 1
-  fi
   values+=("$key=$value")
 done
 

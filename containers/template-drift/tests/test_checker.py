@@ -397,7 +397,6 @@ class CheckerTest(unittest.TestCase):
             (1, (example / "expected-report.txt").read_text(), ""),
         )
 
-    @unittest.skip("README content is integrated on the separate documentation branch")
     def test_the_readme_quotes_the_example_exactly(self):
         readme = (PROJECT / "README.md").read_text()
         self.assertIn((PROJECT / "example/expected-report.txt").read_text(), readme)

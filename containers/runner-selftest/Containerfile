@@ -10,7 +10,7 @@ LABEL org.nwarila.workflow.scratch="true" \
       org.nwarila.workflow.sarif="false" \
       org.nwarila.workflow.image-input="false"
 
-COPY --chown=0:0 --chmod=0444 runner_selftest/*.py /usr/lib/python3.12/site-packages/runner_selftest/
+COPY --chown=0:0 --chmod=0755 runner_selftest/ /usr/lib/python3.12/site-packages/runner_selftest/
 
 # -I ignores PYTHON* environment variables, the user site directory, and the current working directory.
 USER 65532:65532

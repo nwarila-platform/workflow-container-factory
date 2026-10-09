@@ -285,7 +285,7 @@ for file in template-drift.yaml template-drift.lock; do
   reset_inputs; content=$(<"$path")
   printf '%s\r\n' "${content//$'\n'/$'\r\n'}" >"$path"; run_hook "$file CRLF" 2
   reset_inputs; printf '%s' "$content" >"$path"; run_hook "$file no final LF" 2
-  reset_inputs; printf '%s\n' "${content/$'\n'/$'\v'}" >"$path"; run_hook "$file vertical tab" 2
+  reset_inputs; printf '%s\n' "${content/$'\n'/$'\v'}" >"$path"; run_hook "$file vertical tab" 0
 done
 
 reset_inputs

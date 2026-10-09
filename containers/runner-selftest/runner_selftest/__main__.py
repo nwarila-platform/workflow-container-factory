@@ -22,17 +22,17 @@ def _template(value: str) -> tuple[str, Path]:
     return label, Path(directory)
 
 
-def _write(report: str) -> None:
-    """Write the report to standard output directly, without Python's output buffer.
+def _write(file_descriptor: int, text: str) -> None:
+    """Write directly, without Python's output buffer.
 
     A buffered write that fails may be discovered only while the interpreter exits, after the exit
     status has been chosen. Written directly, a report that cannot be delivered is an error here.
     """
-    data = report.encode()
+    data = text.encode()
     while data:
-        written = os.write(sys.stdout.fileno(), data)
+        written = os.write(file_descriptor, data)
         if written == 0:
-            raise OSError("could not write the report")
+            raise OSError("could not write output")
         data = data[written:]
 
 
@@ -78,9 +78,15 @@ def main() -> int:
             lines.append(f"runner-selftest: FAIL ({len(results)} checks, {failed} failed)")
         else:
             lines.append(f"runner-selftest: PASS ({len(results)} checks)")
-        _write("\n".join(lines) + "\n")
+        _write(sys.stdout.fileno(), "\n".join(lines) + "\n")
     except Exception as error:
-        print(f"runner-selftest: error: {type(error).__name__}: {error}", file=sys.stderr)
+        try:
+            _write(
+                sys.stderr.fileno(),
+                f"runner-selftest: error: {type(error).__name__}: {error}\n",
+            )
+        except Exception:
+            pass
         return 2
     return 1 if failed else 0
 

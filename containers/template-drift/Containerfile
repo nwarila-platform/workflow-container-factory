@@ -8,7 +8,7 @@ LABEL org.opencontainers.image.title="workflow-template-drift" \
       org.nwarila.workflow.sarif="false" \
       org.nwarila.workflow.image-input="false"
 
-COPY --chown=0:0 --chmod=0444 workflow_template_drift/*.py /usr/lib/python3.12/site-packages/workflow_template_drift/
+COPY --chown=0:0 --chmod=0755 workflow_template_drift/ /usr/lib/python3.12/site-packages/workflow_template_drift/
 
 USER 65532:65532
 ENTRYPOINT ["/usr/bin/python3.12", "-I", "-B", "-m", "workflow_template_drift"]

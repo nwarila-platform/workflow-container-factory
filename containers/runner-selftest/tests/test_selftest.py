@@ -2,7 +2,6 @@
 
 import contextlib
 import errno
-import io
 import subprocess
 import sys
 import tempfile
@@ -224,15 +223,17 @@ class SelftestTest(unittest.TestCase):
     def test_a_check_that_cannot_run_exits_2_instead_of_reporting_a_failure(self):
         arguments = ["runner-selftest", "--workspace", str(self.root), "--template", f"acme/template={self.root}"]
         error = ValueError("CapBnd is absent from /proc/self/status")
-        stderr = io.StringIO()
-        with (
-            mock.patch.object(sys, "argv", arguments),
-            mock.patch.object(command_line, "run", side_effect=error),
-            contextlib.redirect_stderr(stderr),
-        ):
-            status = command_line.main()
+        with tempfile.TemporaryFile(mode="w+") as stderr:
+            with (
+                mock.patch.object(sys, "argv", arguments),
+                mock.patch.object(command_line, "run", side_effect=error),
+                contextlib.redirect_stderr(stderr),
+            ):
+                status = command_line.main()
+            stderr.seek(0)
+            diagnostic = stderr.read()
         self.assertEqual(
-            (status, stderr.getvalue()),
+            (status, diagnostic),
             (2, "runner-selftest: error: ValueError: CapBnd is absent from /proc/self/status\n"),
         )
 
@@ -258,6 +259,28 @@ class SelftestTest(unittest.TestCase):
             )
         self.assertEqual(done.returncode, 2)
         self.assertIn("runner-selftest: error: OSError", done.stderr)
+
+    @unittest.skipUnless(Path("/dev/full").exists(), "/dev/full is unavailable")
+    def test_an_error_that_cannot_be_written_exits_2(self):
+        arguments = [
+            sys.executable,
+            "-m",
+            "runner_selftest",
+            "--workspace",
+            str(self.root / "missing"),
+            "--template",
+            f"acme/template={self.root}",
+        ]
+        with Path("/dev/full").open("w") as full:
+            done = subprocess.run(
+                arguments,
+                cwd=PROJECT,
+                stdout=full,
+                stderr=full,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(done.returncode, 2)
 
 
 if __name__ == "__main__":

@@ -67,8 +67,7 @@ described in the [container documentation](containers/template-drift/README.md).
 
 ## Verify an image
 
-Install Cosign, then verify the immutable digest rather than a mutable-looking
-tag:
+Install Cosign, then verify the immutable digest rather than the tag:
 
 ```sh
 cosign verify \
@@ -82,9 +81,8 @@ cosign verify \
 
 A successful result proves that the exact digest has a valid Sigstore signature
 issued to this repository's `build.yaml` workflow on the `template-drift/v3.1.1`
-tag. It does not inspect the container's behavior or prove that the tag still
-points to that digest; the shared runner performs those additional checks before
-execution.
+tag. The shared runner additionally checks that the version tag resolves to the
+pinned digest. Neither check inspects the container's behavior.
 
 Verify the index's GitHub build-provenance attestation separately:
 
@@ -98,16 +96,19 @@ gh attestation verify \
 
 ## Release flow
 
-1. A conventional commit scoped to a container, such as
-   `fix(template-drift): reject an invalid manifest`, lands on `main`.
+1. A conventional commit that changes `containers/<name>/`, such as
+   `fix: reject an invalid manifest`, lands on `main`. Release Please routes the
+   commit to a container by the paths it changes.
 2. Release Please maintains a separate release pull request for each container.
    The pull request updates its `VERSION`, changelog, and the release manifest.
-3. After that pull request is merged, the release workflow creates and pushes a
-   signed annotated tag named `<container>/v<X.Y.Z>`.
+3. After that pull request is merged, the Release Please workflow
+   (`release-please.yaml`) creates and pushes a signed annotated tag named
+   `<container>/v<X.Y.Z>`.
 4. The tag workflow requires a verified tag reachable from `main`, builds Linux
    AMD64 and ARM64 images, tests both children, attaches SPDX SBOMs, signs the
    index and children recursively, creates GitHub build provenance for the
-   index, and verifies all of that evidence anonymously.
+   index. Its registry reads during verification are anonymous, while
+   `gh attestation verify` uses the workflow token.
 5. Only after verification does the workflow create the version and
    source-commit tags in GHCR.
 6. The owner checks out the current clean `main` branch and publishes the GitHub
@@ -117,18 +118,20 @@ gh attestation verify \
    tools/github-release.sh template-drift/v3.1.1
    ```
 
-   Release Please deliberately skips GitHub Release creation. The owner-run
-   command rechecks the signed tag, image index, child images, signatures,
-   provenance, and SBOMs before publishing four release assets. Published
-   releases are immutable, so this separate step prevents incomplete or
-   unverified evidence from becoming the permanent release record.
+   The organization's tag ruleset limits creation and updates of version tags
+   and releases to the deploy key and administrators, so the workflow token
+   cannot create the GitHub Release. The owner-run command rechecks the signed
+   tag, image index, child images, signatures, provenance, and SBOMs before
+   publishing four release assets. Published releases are immutable, so this
+   separate step prevents incomplete or unverified evidence from becoming the
+   permanent release record.
 
 ## Repository layout
 
 ```text
 containers/
-  runner-selftest/       Probe, Containerfile, examples, and tests
-  template-drift/        Checker, hook, Containerfile, examples, and tests
+  runner-selftest/        Probe, Containerfile, examples, and tests
+  template-drift/         Checker, hook, Containerfile, examples, and tests
 .github/workflows/
   ci.yaml                 Host and image tests on pull requests and main
   release-please.yaml     Release pull requests and signed release tags
@@ -144,7 +147,7 @@ released versions.
 
 ## Test locally
 
-The host suites need Bash and Python 3. The `template-drift` suite also
+The host suites need Bash, Python 3, Git, and `jq`. The `template-drift` suite also
 exercises its hook with local fakes for Git, Cosign, Docker, and Podman:
 
 ```sh
@@ -158,11 +161,21 @@ Image suites need a working Docker or Podman engine. Build and run one
 architecture as follows; set `CONTAINER_RUNTIME=podman` for Podman:
 
 ```sh
-docker build -t workflow-template-drift:test containers/template-drift
+docker build -f containers/template-drift/Containerfile -t workflow-template-drift:test containers/template-drift
 bash containers/template-drift/tests/image.sh workflow-template-drift:test linux/amd64
 
-docker build -t workflow-runner-selftest:test containers/runner-selftest
+docker build -f containers/runner-selftest/Containerfile -t workflow-runner-selftest:test containers/runner-selftest
 bash containers/runner-selftest/tests/image.sh workflow-runner-selftest:test linux/amd64
+```
+
+With Podman, use the same contexts and Containerfiles:
+
+```sh
+podman build -f containers/template-drift/Containerfile -t workflow-template-drift:test containers/template-drift
+CONTAINER_RUNTIME=podman bash containers/template-drift/tests/image.sh workflow-template-drift:test linux/amd64
+
+podman build -f containers/runner-selftest/Containerfile -t workflow-runner-selftest:test containers/runner-selftest
+CONTAINER_RUNTIME=podman bash containers/runner-selftest/tests/image.sh workflow-runner-selftest:test linux/amd64
 ```
 
 CI repeats every host suite and builds and tests each image on Linux AMD64 and
@@ -170,7 +183,7 @@ ARM64.
 
 ## Status
 
-The repository is active and not archived. The current supported releases are
-`template-drift` 3.1.1 and `runner-selftest` 1.1.0; see
-[the security policy](SECURITY.md) for support and reporting. The project is
-licensed under the [MIT License](LICENSE).
+This repository is maintained. The current supported releases are
+`template-drift` 3.1.1 and `runner-selftest` 1.1.0. The
+[security policy](SECURITY.md) describes support and vulnerability reporting.
+The project is licensed under the [MIT License](LICENSE).

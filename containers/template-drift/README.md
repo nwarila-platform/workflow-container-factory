@@ -88,7 +88,14 @@ return 1.
 
 ## Run locally
 
-From this directory, run the bundled example with Docker:
+From this directory, first make the mounted example world-readable because the
+image runs as user `65532:65532`:
+
+```sh
+chmod -R a+rX example
+```
+
+Then run the bundled example with Docker:
 
 ```sh
 docker run --rm --network=none --read-only --cap-drop=ALL \
@@ -105,15 +112,20 @@ The bundled repository intentionally has drift, so the report above is produced
 and the command returns 1. For Podman, replace `docker` with `podman` and add
 `--read-only-tmpfs=false`.
 
-To build and test the working tree instead:
+To build and test the working tree from the repository root instead:
 
 ```sh
-bash tests/host.sh
-docker build -t workflow-template-drift:test .
-bash tests/image.sh workflow-template-drift:test linux/amd64
+bash containers/template-drift/tests/host.sh
+docker build -f containers/template-drift/Containerfile -t workflow-template-drift:test containers/template-drift
+bash containers/template-drift/tests/image.sh workflow-template-drift:test linux/amd64
 ```
 
-Set `CONTAINER_RUNTIME=podman` on the image-test command to use Podman.
+For Podman:
+
+```sh
+podman build -f containers/template-drift/Containerfile -t workflow-template-drift:test containers/template-drift
+CONTAINER_RUNTIME=podman bash containers/template-drift/tests/image.sh workflow-template-drift:test linux/amd64
+```
 
 ## Run in CI
 
