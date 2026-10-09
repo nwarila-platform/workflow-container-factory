@@ -21,6 +21,7 @@ mkdir -p "$fake_bin" "$consumer/.github/.config" "$case_tmp" "$log"
 oid_a=1111111111111111111111111111111111111111
 oid_b=2222222222222222222222222222222222222222
 digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+real_chmod=$(command -v chmod)
 
 cat >"$fake_bin/git" <<'EOF'
 #!/usr/bin/env bash
@@ -38,6 +39,7 @@ if [[ "${1:-}" == config && "${2:-}" == --get && "${3:-}" == remote.origin.url ]
   exit 0
 fi
 if [[ "${1:-}" == init ]]; then
+  [[ "${HOOK_GIT_INIT_FAIL:-0}" != 1 ]] || exit 128
   mkdir -p "${@: -1}"
   exit 0
 fi
@@ -64,6 +66,13 @@ fi
 exit 1
 EOF
 
+cat >"$fake_bin/chmod" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${HOOK_CHMOD_FAIL:-0}" != 1 ]] || exit 1
+exec "$HOOK_REAL_CHMOD" "$@"
+EOF
+
 cat >"$fake_bin/cosign" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -73,6 +82,7 @@ case "${HOOK_COSIGN:-ok}" in
   empty) printf '[]\n' ;;
   invalid) printf 'not-json\n' ;;
   conflict) printf '[{"critical":{"image":{"docker-manifest-digest":"%s"}}},{"critical":{"image":{"docker-manifest-digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}]\n' "$HOOK_DIGEST" ;;
+  fail) printf 'cosign verification detail\n' >&2; exit 1 ;;
 esac
 EOF
 
@@ -93,7 +103,7 @@ fi
 printf 'template-drift: FAKE CHECKER %s\n' "${HOOK_ENGINE_EXIT:-0}"
 exit "${HOOK_ENGINE_EXIT:-0}"
 EOF
-chmod +x "$fake_bin/git" "$fake_bin/cosign" "$fake_bin/engine"
+chmod +x "$fake_bin/git" "$fake_bin/cosign" "$fake_bin/engine" "$fake_bin/chmod"
 cp "$fake_bin/engine" "$fake_bin/docker"
 cp "$fake_bin/engine" "$fake_bin/podman"
 rm "$fake_bin/engine"
@@ -113,7 +123,8 @@ run_hook() {
   set +e
   (cd "$consumer" && env PATH="$fake_bin:$PATH" TMPDIR="$case_tmp" \
     HOOK_TOP="$consumer" HOOK_ORIGIN=https://github.com/octo/consumer.git \
-    HOOK_LOG="$log" HOOK_DIGEST="$digest" "$@" "$hook") >"$log/output" 2>&1
+    HOOK_LOG="$log" HOOK_DIGEST="$digest" HOOK_REAL_CHMOD="$real_chmod" \
+    "$@" "$hook") >"$log/output" 2>&1
   actual=$?
   set -e
   if [[ "$actual" != "$expected" ]]; then
@@ -203,11 +214,18 @@ printf 'octo/.github %s\n' "$oid_a" >"$consumer/.github/.config/template-drift.l
 run_hook "lock list mismatch" 2
 reset_inputs
 run_hook "fetched HEAD mismatch" 2 HOOK_HEAD_MISMATCH=1
+reset_inputs
+run_hook "git init failure" 2 HOOK_GIT_INIT_FAIL=1
+reset_inputs
+run_hook "chmod failure" 2 HOOK_CHMOD_FAIL=1
 
 for cosign_mode in empty invalid conflict; do
   reset_inputs
   run_hook "cosign $cosign_mode" 2 HOOK_COSIGN="$cosign_mode"
 done
+reset_inputs
+run_hook "cosign failure output" 2 HOOK_COSIGN=fail
+grep -qxF "cosign verification detail" "$log/output"
 
 for status_pair in 0:0 1:1 2:2 17:2; do
   reset_inputs
@@ -223,7 +241,8 @@ mkdir -p "$case_tmp" "$log"
 set +e
 (cd "$consumer" && exec env PATH="$fake_bin:$PATH" TMPDIR="$case_tmp" \
   HOOK_TOP="$consumer" HOOK_ORIGIN=https://github.com/octo/consumer.git \
-  HOOK_LOG="$log" HOOK_DIGEST="$digest" HOOK_BLOCK=1 "$hook") >"$log/output" 2>&1 &
+  HOOK_LOG="$log" HOOK_DIGEST="$digest" HOOK_REAL_CHMOD="$real_chmod" \
+  HOOK_BLOCK=1 "$hook") >"$log/output" 2>&1 &
 hook_pid=$!
 for _ in $(seq 1 50); do
   [[ -e "$log/engine-started" ]] && break

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 shopt -s inherit_errexit
 
 fail() {
@@ -10,20 +10,30 @@ fail() {
 temporary_directory=
 # shellcheck disable=SC2317 # Called through the traps below.
 cleanup() {
+  local status=$?
+  trap - ERR EXIT HUP INT TERM
   if [[ -n "$temporary_directory" ]]; then
-    rm -rf "$temporary_directory"
+    if ! rm -rf "$temporary_directory"; then
+      printf 'template-drift hook: cannot remove temporary directory\n' >&2 || :
+      exit 2
+    fi
   fi
+  return "$status"
 }
 trap cleanup EXIT
-trap 'cleanup; exit 2' HUP INT TERM
+trap 'exit 2' HUP INT TERM
+trap 'status=$?; trap - ERR; printf "template-drift hook: launcher failure at line %s (status %s)\n" "$LINENO" "$status" >&2 || :; exit 2' ERR
 
-launcher_directory=$(cd -- "$(dirname -- "$0")" && pwd -P) || fail "cannot locate the launcher"
+launcher_parent=$(dirname -- "$0") || fail "cannot locate the launcher"
+launcher_directory=$(cd -- "$launcher_parent" && pwd -P) || fail "cannot locate the launcher"
 factory_root=$(cd -- "$launcher_directory/../../.." && pwd -P) || fail "cannot locate the factory checkout"
 version_file="$factory_root/containers/template-drift/VERSION"
 [[ -f "$version_file" ]] || fail "missing VERSION"
-version_with_sentinel=$(cat "$version_file"; printf x)
+version_with_sentinel=$(cat "$version_file" && printf x) || fail "cannot read VERSION"
 version_with_lf=${version_with_sentinel%x}
 [[ "$version_with_lf" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'\n'$ ]] || fail "invalid VERSION"
+version_byte_count=$(wc -c <"$version_file") || fail "cannot read VERSION"
+[[ "$version_byte_count" -eq ${#version_with_lf} ]] || fail "invalid VERSION"
 version=${version_with_lf%$'\n'}
 
 for command_name in git jq python3 cosign; do
@@ -48,7 +58,8 @@ command -v "$engine" >/dev/null || fail "missing $engine"
 "$engine" info >/dev/null 2>&1 || fail "$engine is not working"
 
 checkout=$(git rev-parse --show-toplevel 2>/dev/null) || fail "not in a Git work tree"
-[[ "$checkout" == "$(pwd -P)" ]] || fail "run from the top of the work tree"
+working_directory=$(pwd -P) || fail "cannot locate the working directory"
+[[ "$checkout" == "$working_directory" ]] || fail "run from the top of the work tree"
 origin=$(git config --get remote.origin.url) || fail "no origin"
 if [[ "$origin" =~ ^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$ ]] \
   || [[ "$origin" =~ ^git@github\.com:([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$ ]] \
@@ -61,7 +72,7 @@ fi
 [[ -n "$consumer_repository" ]] || fail "origin has no repository name"
 
 # Ported from run-container.yaml@95ca3c2332c8037f1ede76d1c2bd1a6b6ee43d4f lines 230-263.
-pins=$(python3 - .github/.config/template-drift.yaml .github/.config/template-drift.lock \
+pins=$(python3 -I - .github/.config/template-drift.yaml .github/.config/template-drift.lock \
   "$consumer_owner" "$consumer_owner/$consumer_repository" <<'PY'
 import re
 import sys
@@ -125,30 +136,40 @@ template_mounts=()
 checker_templates=()
 index=0
 # Fetch and checkout follow runner lines 264-271; local operation deliberately omits lines 272-278's
-# default-branch reachability and pull-request non-rewind checks.
+# public-repository, default-branch reachability and pull-request non-rewind checks; the anonymous
+# fetch stands in for the public check.
 while read -r identity oid; do
   template_directory="$temporary_directory/$index"
-  git init -q "$template_directory"
-  git -C "$template_directory" -c credential.helper= fetch --quiet --no-tags --depth=1 \
+  git init -q "$template_directory" || fail "cannot create $template_directory"
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    git -C "$template_directory" -c credential.helper= fetch --quiet --no-tags --depth=1 \
     "https://github.com/$identity.git" "$oid" || fail "cannot fetch $identity@$oid"
   git -C "$template_directory" -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD \
     || fail "cannot check out $identity@$oid"
-  [[ $(git -C "$template_directory" rev-parse HEAD) == "$oid" ]] \
-    || fail "checkout of $identity is not $oid"
+  template_head=$(git -C "$template_directory" rev-parse HEAD) \
+    || fail "cannot read the checkout commit for $identity"
+  [[ "$template_head" == "$oid" ]] || fail "checkout of $identity is not $oid"
   template_mounts+=(-v "$template_directory:/templates/$index:ro")
   checker_templates+=(--template "$identity=/templates/$index")
   index=$((index + 1))
 done <<<"$pins"
-chmod -R a+rX "$temporary_directory"
+chmod -R a+rX "$temporary_directory" || fail "cannot make the template checkouts readable"
 
 image=ghcr.io/nwarila-platform/workflow-template-drift
 certificate_identity="https://github.com/nwarila-platform/workflow-container-factory/.github/workflows/build.yaml@refs/tags/template-drift/v$version"
-verification=$(cosign verify "$image:$version" \
+cosign_error="$temporary_directory/cosign.stderr"
+if verification=$(cosign verify "$image:$version" \
   --certificate-identity "$certificate_identity" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-github-workflow-repository nwarila-platform/workflow-container-factory \
   --certificate-github-workflow-ref "refs/tags/template-drift/v$version" \
-  -o json 2>/dev/null) || fail "image signature not verified"
+  -o json 2>"$cosign_error"); then
+  :
+else
+  printf 'template-drift hook: image signature not verified\n' >&2 || :
+  cat "$cosign_error" >&2 || :
+  exit 2
+fi
 digest=$(jq -er '
   if type == "array" and length > 0 then
     [.[].critical.image["docker-manifest-digest"]] | unique |

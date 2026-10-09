@@ -43,8 +43,9 @@ keyless signature, fetches each locked public template anonymously, and runs the
 digest with the same read-only mounts and runtime restrictions used in CI.
 
 The hook requires `git`, `jq`, `python3`, `cosign`, and either a working Docker daemon or rootless
-Podman. It uses `$TEMPLATE_DRIFT_ENGINE` when that variable is set to `docker` or `podman`; otherwise
-it tries Docker first and then Podman, choosing the first engine whose `info` command succeeds.
+Podman. If `TEMPLATE_DRIFT_ENGINE` is set, it must be `docker` or `podman` and that engine's `info` command must
+succeed; otherwise the hook stops with exit status 2. If the variable is unset or empty, the hook tries
+Docker first and then Podman and uses the first engine whose `info` command succeeds.
 
 Add the released hook to a consumer's `.pre-commit-config.yaml`, replacing `X` and the revision with
 the release's version and peeled tag commit:
@@ -57,9 +58,20 @@ repos:
       - id: template-drift
 ```
 
-The local hook has a deliberately narrower trust model than the CI runner: it verifies signatures
-and exact locked commits, but it does not prove default-branch reachability or reject a lock
-non-rewind. CI's runner performs both checks on every pull request and push and remains authoritative.
+The hook runs at `git push`. Install that hook type once per clone with
+`pre-commit install --hook-type pre-push`, or list `pre-push` in `default_install_hook_types` in the consumer's
+`.pre-commit-config.yaml`.
+
+The hook takes the repository's owner from the `origin` URL; clone with the owner's exact GitHub spelling.
+Each template fetch ignores system and global Git configuration; environment-supplied command-scoped Git
+configuration still applies.
+
+The local hook has a deliberately narrower trust model than the CI runner. It verifies the image
+signature and checks out each template at exactly its locked commit, but it reads the template list
+and lock from the working tree and does not prove default-branch reachability of the locked commits.
+It also does not reject a lock that moves back to an older commit. On every pull request and push the
+runner proves default-branch reachability; on every pull request it also reads the list and lock from
+the protected base branch and rejects a lock that moves backwards. The runner remains authoritative.
 
 ## Bundled example
 
