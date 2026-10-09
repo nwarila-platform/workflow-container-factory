@@ -1,1 +1,1 @@
-"""Checks for the workflow container runner's isolation contract."""
+"""Report whether the workflow container runner's isolation holds."""

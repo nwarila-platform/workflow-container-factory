@@ -12,6 +12,12 @@ platform=$2
 runtime=${CONTAINER_RUNTIME:-docker}
 cd "$(dirname "$0")/.."
 
+restrictions=(--network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges)
+if [[ $runtime == podman ]]; then
+  # Podman makes /tmp and /var/tmp writable under --read-only unless this option is disabled.
+  restrictions+=(--read-only-tmpfs=false)
+fi
+
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
@@ -24,21 +30,22 @@ chmod -R a+rX "$work/example"
 # is a result to compare here, not a failure of this script.
 run() {
   status=0
-  "$runtime" run --rm --platform "$platform" --network=none --read-only --cap-drop=ALL \
-    --security-opt=no-new-privileges "$@" >"$work/report" 2>"$work/errors" || status=$?
+  "$runtime" run --rm --platform "$platform" "${restrictions[@]}" "$@" \
+    >"$work/report" 2>"$work/errors" || status=$?
 }
 
 fail() {
   echo "image test failed: $1 (status $status)" >&2
+  cat "$work/report" >&2
   cat "$work/errors" >&2
   exit 1
 }
 
 # The example repository has drifted from its template: status 1 and exactly the expected report.
 run --volume "$work/example/repository:/workspace:ro" --volume "$work/example/template:/templates/0:ro" \
-  "$image" --workspace /workspace --template example/template=/templates/0 --fail-on error --format text
+  "$image" --workspace /workspace --template example/template=/templates/0 --format text
 [[ $status -eq 1 ]] || fail "the example should exit with status 1"
-diff example/expected-report.txt "$work/report" || fail "the example's report differs from example/expected-report.txt"
+diff -u example/expected-report.txt "$work/report" || fail "the example's report differs from example/expected-report.txt"
 
 # No arguments is a usage error: status 2 and no report.
 run "$image"

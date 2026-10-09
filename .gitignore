@@ -20,13 +20,14 @@
 !/containers/template-drift/
 !/containers/template-drift/example/
 !/containers/template-drift/example/repository/
+!/containers/template-drift/example/repository/ci/
 !/containers/template-drift/example/template/
 !/containers/template-drift/hook/
 !/containers/template-drift/tests/
 !/containers/template-drift/workflow_template_drift/
 !/tools/
 
-# The runner-selftest image, tests, and example mounts.
+# The runner-selftest probe, image, tests, and example mounts.
 !/containers/runner-selftest/Containerfile
 !/containers/runner-selftest/.dockerignore
 !/containers/runner-selftest/VERSION
@@ -53,9 +54,9 @@
 !/containers/template-drift/CHANGELOG.md
 !/containers/template-drift/example/expected-report.txt
 !/containers/template-drift/example/repository/CHANGELOG.md
+!/containers/template-drift/example/repository/ci/pipeline.yaml
 !/containers/template-drift/example/repository/legacy.cfg
 !/containers/template-drift/example/repository/lint.toml
-!/containers/template-drift/example/repository/pipeline.yaml
 !/containers/template-drift/example/template/lint.toml
 !/containers/template-drift/example/template/pipeline.yaml
 !/containers/template-drift/example/template/template-drift.json
@@ -67,7 +68,7 @@
 !/containers/template-drift/workflow_template_drift/__main__.py
 !/containers/template-drift/workflow_template_drift/checker.py
 
-# Continuous integration, release workflows, ownership, and dependency updates.
+# Workflows, dependency updates, and ownership.
 !/.github/workflows/ci.yaml
 !/.github/workflows/release.yaml
 !/.github/workflows/build.yaml
@@ -76,9 +77,10 @@
 !/.github/renovate.json5
 !/.github/CODEOWNERS
 
-# Shared release tooling.
+# Shared validation and release tooling.
 !/tools/install-crane.sh
 !/tools/check-labels.sh
+!/tools/test_check_labels.py
 !/tools/check-index.py
 !/tools/test_check_index.py
 !/tools/github-release.sh

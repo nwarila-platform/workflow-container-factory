@@ -1,21 +1,51 @@
+<!-- markdownlint-configure-file {"MD013":{"code_blocks":false,"tables":false}} -->
+
 # runner-selftest
 
-`runner-selftest` checks, from inside a container, the isolation that the organization's runner applies.
-It prints one line per check, in this order:
+`runner-selftest` reports whether the runtime environment supplied by the shared
+workflow-container runner has the isolation required by contract 2. It diagnoses
+the environment from inside the container. It does not configure the host, add
+restrictions, repair a failing runner, inspect the calling repository's content,
+or replace the runner's own signature and input checks.
 
-- `user`: the process runs as user and group 65532.
-- `capabilities`: the effective and bounding capability sets are empty.
-- `no-new-privileges`: the process cannot gain privileges.
-- `network`: the only network interface is loopback.
-- `root read-only`: the image's root file system cannot be written.
-- `workspace readable` and `workspace read-only`: the workspace has an entry and cannot be written.
-- `template readable` and `template read-only`: the same, once for each template.
-- `scratch`: a file can be written in `/tmp`, which is mounted `nosuid`, `nodev` and `noexec`.
-- `home scratch`: a file can be written in `/home/nonroot`, which is mounted `nosuid`, `nodev` and `noexec`.
+Current release: `1.1.0` at
+`sha256:44ec1f7813f872af2587fae4d6006de1919c3a2ae3ebf417bc429ac7332b2ac6`.
 
-It does not look for other writable mounts, such as `/dev/shm`.
+## Checks
 
-Example output with one template:
+The report covers:
+
+- effective UID and GID are `65532:65532`;
+- inherited, permitted, effective, bounding, and ambient Linux capability sets
+  are empty;
+- `NoNewPrivs` is enabled;
+- no network interface other than loopback is present;
+- the image root is read-only;
+- the workspace is nonempty, readable, and read-only;
+- every template is nonempty, readable, and read-only; and
+- `/tmp` and `/home/nonroot` are writable tmpfs mounts with `nosuid`, `nodev`,
+  and `noexec`.
+
+The probes create temporary files only where they are testing writability. They
+do not alter the read-only workspace or template mounts.
+
+## Inputs and mounts
+
+The entry point accepts:
+
+- `--workspace DIRECTORY`: the mounted workspace; required once.
+- `--template OWNER/REPO=DIRECTORY`: the label and mount for a template;
+  required and repeatable.
+- `--format text`: the report format. Text is currently the only format.
+
+The contract-2 runner mounts the workspace at `/workspace`, templates under
+`/templates`, and scratch tmpfs filesystems at `/tmp` and `/home/nonroot`. The
+workspace and template example files are under [`example/`](example/).
+
+## Output and exit status
+
+Text output contains one `ok:` or `error:` line for every probe and ends with
+exactly one summary:
 
 ```text
 ok: user
@@ -32,36 +62,91 @@ ok: home scratch
 runner-selftest: PASS (11 checks)
 ```
 
-## Run the image
+The status is:
 
-Mount a nonempty workspace and at least one nonempty template. The image runs as user `65532`, so that
-user must be able to read and traverse each mounted directory. From this directory:
+| Status | Meaning                                                                               |
+| ------ | ------------------------------------------------------------------------------------- |
+| `0`    | Every isolation check passed; the final line is `runner-selftest: PASS (...)`.        |
+| `1`    | One or more isolation checks failed; the final line is `runner-selftest: FAIL (...)`. |
+| `2`    | Invalid arguments or another runtime failure prevented a complete report.             |
 
-Set `version` to the release you want from the factory's
-[Releases page](https://github.com/nwarila-platform/workflow-container-factory/releases), then verify
-the image:
+## Run locally
 
-```sh
-version='<release version>'
-digest=$(crane digest "ghcr.io/nwarila-platform/workflow-runner-selftest:${version}")
-cosign verify "ghcr.io/nwarila-platform/workflow-runner-selftest@${digest}" \
-  --certificate-identity "https://github.com/nwarila-platform/workflow-container-factory/.github/workflows/build.yaml@refs/tags/runner-selftest/v${version}" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
-```
+From this directory, Docker can reproduce the runner's passing environment:
 
 ```sh
-docker run --rm --platform linux/amd64 --network=none --read-only --cap-drop=ALL \
+docker run --rm --network=none --read-only --cap-drop=ALL \
   --security-opt=no-new-privileges \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777 \
   --tmpfs /home/nonroot:rw,nosuid,nodev,noexec,size=16m,mode=1777 \
   --volume "$PWD/example/workspace:/workspace:ro" \
   --volume "$PWD/example/template:/templates/0:ro" \
-  "ghcr.io/nwarila-platform/workflow-runner-selftest@${digest}" \
+  'ghcr.io/nwarila-platform/workflow-runner-selftest@sha256:44ec1f7813f872af2587fae4d6006de1919c3a2ae3ebf417bc429ac7332b2ac6' \
   --workspace /workspace \
   --template example/template=/templates/0 \
   --format text
 ```
 
-Exit status `0` means every check passed. Exit status `1` means at least one isolation check failed.
-Exit status `2` means the selftest could not run or its arguments were invalid. This container has no
-write mode because it checks the runner's isolation and has nothing to correct.
+With Podman, replace `docker` with `podman`, add
+`--userns=keep-id:uid=65532,gid=65532`, and add `notmpcopyup` to both `--tmpfs`
+option lists.
+
+To build and test the working tree instead:
+
+```sh
+bash tests/host.sh
+docker build -t workflow-runner-selftest:test .
+bash tests/image.sh workflow-runner-selftest:test linux/amd64
+```
+
+Set `CONTAINER_RUNTIME=podman` on the image-test command to use Podman. The
+image suite first requires the full passing report, then removes one isolation
+flag at a time and requires only the corresponding probe to fail.
+
+## Run in CI
+
+The repository's acceptance workflow uses the current release through the shared
+runner:
+
+```yaml
+jobs:
+  runner-selftest:
+    permissions:
+      contents: read
+      security-events: write
+    uses: nwarila-platform/.github/.github/workflows/run-container.yaml@95ca3c2332c8037f1ede76d1c2bd1a6b6ee43d4f
+    with:
+      name: runner-selftest
+      # renovate: datasource=docker depName=ghcr.io/nwarila-platform/workflow-runner-selftest
+      version: 1.1.0
+      digest: sha256:44ec1f7813f872af2587fae4d6006de1919c3a2ae3ebf417bc429ac7332b2ac6
+      contract: 2
+```
+
+`runner-selftest` declares that it needs scratch space and a second input. A
+caller therefore commits `.github/.config/runner-selftest.yaml` and
+`.github/.config/runner-selftest.lock` in the same identity-and-lock format used
+by other second-input containers. The factory's acceptance fixture mounts
+`nwarila-platform/workflow-container-template` at commit
+`0b366f86a1d78defe8a05098aa881e8998ce8a4b`. The runner verifies the image and
+tag, validates the requirement labels, prepares the mounts, runs the image
+without networking, and restores its exit status.
+
+The factory's CI also runs Python unit tests on the host and builds and executes
+the image on Linux AMD64 and ARM64. The release workflow repeats the image suite
+against both release children before signing and promotion.
+
+## Verify this release
+
+```sh
+cosign verify \
+  'ghcr.io/nwarila-platform/workflow-runner-selftest@sha256:44ec1f7813f872af2587fae4d6006de1919c3a2ae3ebf417bc429ac7332b2ac6' \
+  --certificate-identity \
+  'https://github.com/nwarila-platform/workflow-container-factory/.github/workflows/build.yaml@refs/tags/runner-selftest/v1.1.0' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-github-workflow-repository nwarila-platform/workflow-container-factory \
+  --certificate-github-workflow-ref refs/tags/runner-selftest/v1.1.0
+```
+
+The command verifies the signature on this exact index digest and restricts the
+signing identity to the factory's build workflow at `runner-selftest/v1.1.0`.

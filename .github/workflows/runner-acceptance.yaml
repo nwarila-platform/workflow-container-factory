@@ -1,21 +1,21 @@
 # Purpose: prove the organization runner's contract 2 against real factory images.
-# Role: one passing run of runner-selftest, then four refusals in the runner's expect: refuse mode,
-# which never runs a container. The copy job deliberately copies template-drift 3.0.2 and its
-# signature into the runner-selftest package, so the runner can show that it finds that signature
-# and refuses it. Digests:
-# runner-selftest 1.0.0 sha256:dd291fb72ee121979ef4f25c45ef663ff2ea544b45bb6438d2c11fb0ca30c079,
-# template-drift 3.0.2 sha256:5bb864992d263749a8c648f01518b1bf64482746d0a7d0f1c8c398ce588cc159,
-# template-drift 3.0.1 sha256:cfa642722759575d51d59d6508e6bfd50844b03e0793226e9a7b2d947bea60ff
-# (no requirement labels).
+# Role: accept runner-selftest and exercise input, identity, tag, and label refusal paths with signed images.
+
 name: Runner acceptance
+
 on:
   workflow_dispatch:
   push:
     branches: [main]
   pull_request:
-    paths: ['.github/workflows/runner-acceptance.yaml']
+    paths:
+      - .github/workflows/runner-acceptance.yaml
+      - .github/.config/runner-selftest.yaml
+      - .github/.config/runner-selftest.lock
+
 permissions:
   contents: read
+
 jobs:
   selftest:
     name: selftest passes
@@ -25,13 +25,15 @@ jobs:
     uses: nwarila-platform/.github/.github/workflows/run-container.yaml@95ca3c2332c8037f1ede76d1c2bd1a6b6ee43d4f
     with:
       name: runner-selftest
-      version: 1.0.0
+      version: 1.1.0
       contract: 2
-      digest: sha256:dd291fb72ee121979ef4f25c45ef663ff2ea544b45bb6438d2c11fb0ca30c079
+      digest: sha256:44ec1f7813f872af2587fae4d6006de1919c3a2ae3ebf417bc429ac7332b2ac6
       expect: pass
 
+  # Copy a validly signed template-drift digest into the runner-selftest package so the refusal
+  # isolates the signature identity check instead of failing because the destination has no signature.
   copy:
-    name: copy
+    name: copy template-drift into runner-selftest
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -55,24 +57,24 @@ jobs:
             tuf-repo-cdn.sigstore.dev:443
             *.githubapp.com:443
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        with: {cosign-release: v2.5.2}
-      - name: Copy image and verify travelled signature
+        with:
+          cosign-release: v2.5.2
+      - name: Copy the image and verify its signature in the new package
         env:
-          GH_TOKEN: ${{ github.token }}
+          GHCR_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          printf '%s' "$GH_TOKEN" | cosign login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          printf '%s' "$GHCR_TOKEN" | cosign login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           cosign copy --force \
             "ghcr.io/nwarila-platform/workflow-template-drift@sha256:5bb864992d263749a8c648f01518b1bf64482746d0a7d0f1c8c398ce588cc159" \
             "ghcr.io/nwarila-platform/workflow-runner-selftest:acceptance-copied-template-drift-3.0.2"
-          cosign verify -o json \
+          verified=$(cosign verify -o json \
             "ghcr.io/nwarila-platform/workflow-runner-selftest@sha256:5bb864992d263749a8c648f01518b1bf64482746d0a7d0f1c8c398ce588cc159" \
             --certificate-identity https://github.com/nwarila-platform/workflow-container-factory/.github/workflows/build.yaml@refs/tags/template-drift/v3.0.2 \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --certificate-github-workflow-repository nwarila-platform/workflow-container-factory \
             --certificate-github-workflow-ref refs/tags/template-drift/v3.0.2 \
-            >verification.json
-          verified=$(jq -er '.[0].critical.image["docker-manifest-digest"] | select(test("^sha256:[0-9a-f]{64}$"))' verification.json)
+            | jq -er '.[0].critical.image["docker-manifest-digest"]')
           [[ "$verified" == sha256:5bb864992d263749a8c648f01518b1bf64482746d0a7d0f1c8c398ce588cc159 ]]
           printf 'copied signature found: template-drift identity at runner-selftest@%s\n' "$verified"
 
@@ -85,7 +87,7 @@ jobs:
     uses: nwarila-platform/.github/.github/workflows/run-container.yaml@95ca3c2332c8037f1ede76d1c2bd1a6b6ee43d4f
     with:
       name: runner-selftest
-      version: 1.0.0
+      version: 1.1.0
       contract: 2
       digest: sha256:5bb864992d263749a8c648f01518b1bf64482746d0a7d0f1c8c398ce588cc159
       expect: refuse
@@ -100,9 +102,24 @@ jobs:
       name: runner-selftest
       version: 9.9.9
       contract: 2
-      digest: sha256:dd291fb72ee121979ef4f25c45ef663ff2ea544b45bb6438d2c11fb0ca30c079
+      digest: sha256:44ec1f7813f872af2587fae4d6006de1919c3a2ae3ebf417bc429ac7332b2ac6
       expect: refuse
 
+  # The signed linux/amd64 child is valid for 1.1.0, but the version tag names its index.
+  child-digest-refused:
+    name: child digest refused
+    permissions:
+      contents: read
+      security-events: write
+    uses: nwarila-platform/.github/.github/workflows/run-container.yaml@95ca3c2332c8037f1ede76d1c2bd1a6b6ee43d4f
+    with:
+      name: runner-selftest
+      version: 1.1.0
+      contract: 2
+      digest: sha256:bc7ac68f28a07861ca69f6bbb80b10ddc9d331877f500db2393e06869789bb84
+      expect: refuse
+
+  # template-drift 3.0.1 predates requirement labels.
   missing-labels-refused:
     name: missing labels refused
     permissions:
@@ -124,7 +141,7 @@ jobs:
     uses: nwarila-platform/.github/.github/workflows/run-container.yaml@95ca3c2332c8037f1ede76d1c2bd1a6b6ee43d4f
     with:
       name: runner-selftest
-      version: 1.0.0
+      version: 1.1.0
       contract: 1
-      digest: sha256:dd291fb72ee121979ef4f25c45ef663ff2ea544b45bb6438d2c11fb0ca30c079
+      digest: sha256:44ec1f7813f872af2587fae4d6006de1919c3a2ae3ebf417bc429ac7332b2ac6
       expect: refuse

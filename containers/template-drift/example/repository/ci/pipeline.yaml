@@ -2,3 +2,4 @@ stages:
   - lint
   - test
   # Lines 1-4 must match the template. Add your own stages below.
+  - deploy
